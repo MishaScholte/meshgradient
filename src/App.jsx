@@ -2,8 +2,8 @@ import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const CANVAS_W = 800
-const CANVAS_H = 600
+const CANVAS_W = 856
+const CANVAS_H = 540
 const MIN_ZOOM = 0.05
 const MAX_ZOOM = 10
 const ZOOM_STEP = 1.08
@@ -13,7 +13,7 @@ const MAX_HISTORY = 50
 const LS_KEY = 'hazy-palettes'
 const DEFAULT_WARP_R = 150
 const MIN_WARP_R = 20
-const INIT_FILTERS = { grain: 0, blur: 0, contrast: 100, brightness: 100, hue: 0 }
+const INIT_FILTERS = { grain: 0, blur: 0, contrast: 100, brightness: 100, saturation: 100, hue: 0 }
 const DEFAULT_RX = 280
 const DEFAULT_RY = 280
 const MIN_RADIUS = 20
@@ -52,11 +52,12 @@ function loadPalettes() {
 function writePalettes(p) { localStorage.setItem(LS_KEY, JSON.stringify(p)) }
 
 
-function buildCSSFilter({ blur, contrast, brightness, hue }) {
+function buildCSSFilter({ blur, contrast, brightness, saturation, hue }) {
   const parts = []
   if (blur > 0) parts.push(`blur(${(blur * 0.2).toFixed(1)}px)`)
   if (contrast !== 100) parts.push(`contrast(${contrast}%)`)
   if (brightness !== 100) parts.push(`brightness(${brightness}%)`)
+  if ((saturation ?? 100) !== 100) parts.push(`saturate(${saturation ?? 100}%)`)
   if (hue !== 0) parts.push(`hue-rotate(${hue}deg)`)
   return parts.join(' ') || 'none'
 }
@@ -71,21 +72,22 @@ const INIT_COLORS = [
 ]
 
 const INIT_DOTS = [
-  { id: 'da', colorId: 'ca', x: 200, y: 150, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
-  { id: 'db', colorId: 'cb', x: 600, y: 150, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
-  { id: 'dc', colorId: 'cc', x: 200, y: 450, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
-  { id: 'dd', colorId: 'cd', x: 600, y: 450, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
+  { id: 'da', colorId: 'ca', x: 214, y: 135, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
+  { id: 'db', colorId: 'cb', x: 642, y: 135, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
+  { id: 'dc', colorId: 'cc', x: 214, y: 405, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
+  { id: 'dd', colorId: 'cd', x: 642, y: 405, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
 ]
 
 const INIT_WARP = { warpDots: [], intensity: 100 }
 
 const INIT_DOC = {
   background: { hex: '#050510', transparent: false },
-  size: { w: 800, h: 600 },
+  size: { w: CANVAS_W, h: CANVAS_H },
   sharpness: 2,
   colors: INIT_COLORS,
   dots: INIT_DOTS,
   warp: INIT_WARP,
+  blurDots: [],
   filters: INIT_FILTERS,
 }
 
@@ -169,7 +171,7 @@ function applyWarp(visCtx, offscreen, { warpDots = [], intensity = 100 }) {
   const scale = intensity / 100
   const W = offscreen.width, H = offscreen.height
 
-  const active = (warpDots).filter(d => d.dx !== 0 || d.dy !== 0)
+  const active = warpDots.filter(d => d.dx !== 0 || d.dy !== 0)
   if (!active.length || scale === 0) {
     visCtx.clearRect(0, 0, W, H)
     visCtx.drawImage(offscreen, 0, 0)
@@ -181,11 +183,17 @@ function applyWarp(visCtx, offscreen, { warpDots = [], intensity = 100 }) {
   const destImg = new ImageData(W, H)
   const dest = destImg.data
 
-  const dots = active.map(d => ({
-    x: d.x, y: d.y,
-    dx: d.dx * scale, dy: d.dy * scale,
-    r2: Math.max(1, d.r * d.r),
-  }))
+  const dots = active.map(d => {
+    const theta = d.theta ?? 0
+    const rx = Math.max(1, d.rx ?? DEFAULT_WARP_R)
+    const ry = Math.max(1, d.ry ?? DEFAULT_WARP_R)
+    return {
+      x: d.x, y: d.y,
+      dx: d.dx * scale, dy: d.dy * scale,
+      cosT: Math.cos(theta), sinT: Math.sin(theta),
+      rx2: rx * rx, ry2: ry * ry,
+    }
+  })
   const n = dots.length
 
   for (let py = 0; py < H; py++) {
@@ -193,8 +201,10 @@ function applyWarp(visCtx, offscreen, { warpDots = [], intensity = 100 }) {
       let dxSum = 0, dySum = 0
       for (let i = 0; i < n; i++) {
         const d = dots[i]
-        const ex = px - d.x, ey = py - d.y
-        const w = Math.exp(-(ex * ex + ey * ey) / d.r2)
+        const rawX = px - d.x, rawY = py - d.y
+        const ex = rawX * d.cosT + rawY * d.sinT
+        const ey = -rawX * d.sinT + rawY * d.cosT
+        const w = Math.exp(-(ex * ex) / d.rx2 - (ey * ey) / d.ry2)
         dxSum += d.dx * w
         dySum += d.dy * w
       }
@@ -209,6 +219,73 @@ function applyWarp(visCtx, offscreen, { warpDots = [], intensity = 100 }) {
 
   visCtx.clearRect(0, 0, W, H)
   visCtx.putImageData(destImg, 0, 0)
+}
+
+function applyMotionBlur(visCtx, offscreen, blurDots = []) {
+  const W = offscreen.width, H = offscreen.height
+  const active = blurDots.filter(d => d.dx !== 0 || d.dy !== 0)
+  if (!active.length) {
+    visCtx.clearRect(0, 0, W, H)
+    visCtx.drawImage(offscreen, 0, 0)
+    return
+  }
+
+  const offCtx = offscreen.getContext('2d')
+  const src = offCtx.getImageData(0, 0, W, H).data
+  const dest = new ImageData(W, H)
+  const d = dest.data
+  const SAMPLES = 12
+
+  const dots = active.map(dot => {
+    const theta = dot.theta ?? 0
+    return {
+      x: dot.x, y: dot.y,
+      dx: dot.dx, dy: dot.dy,
+      cosT: Math.cos(theta), sinT: Math.sin(theta),
+      rx2: Math.max(1, (dot.rx ?? DEFAULT_WARP_R) ** 2),
+      ry2: Math.max(1, (dot.ry ?? DEFAULT_WARP_R) ** 2),
+    }
+  })
+  const n = dots.length
+
+  for (let py = 0; py < H; py++) {
+    for (let px = 0; px < W; px++) {
+      let wdx = 0, wdy = 0
+      for (let i = 0; i < n; i++) {
+        const dot = dots[i]
+        const rawX = px - dot.x, rawY = py - dot.y
+        const ex = rawX * dot.cosT + rawY * dot.sinT
+        const ey = -rawX * dot.sinT + rawY * dot.cosT
+        const w = Math.exp(-(ex * ex) / dot.rx2 - (ey * ey) / dot.ry2)
+        wdx += dot.dx * w
+        wdy += dot.dy * w
+      }
+
+      const di = (py * W + px) << 2
+      if (Math.abs(wdx) < 0.5 && Math.abs(wdy) < 0.5) {
+        d[di] = src[di]; d[di+1] = src[di+1]; d[di+2] = src[di+2]; d[di+3] = src[di+3]
+        continue
+      }
+
+      let rS = 0, gS = 0, bS = 0, aS = 0
+      for (let s = 0; s < SAMPLES; s++) {
+        const t = s / (SAMPLES - 1) - 0.5
+        let sx = (px + wdx * t + 0.5) | 0
+        let sy = (py + wdy * t + 0.5) | 0
+        if (sx < 0) sx = 0; else if (sx >= W) sx = W - 1
+        if (sy < 0) sy = 0; else if (sy >= H) sy = H - 1
+        const si = (sy * W + sx) << 2
+        rS += src[si]; gS += src[si+1]; bS += src[si+2]; aS += src[si+3]
+      }
+      d[di] = (rS / SAMPLES + 0.5) | 0
+      d[di+1] = (gS / SAMPLES + 0.5) | 0
+      d[di+2] = (bS / SAMPLES + 0.5) | 0
+      d[di+3] = (aS / SAMPLES + 0.5) | 0
+    }
+  }
+
+  visCtx.clearRect(0, 0, W, H)
+  visCtx.putImageData(dest, 0, 0)
 }
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
@@ -466,10 +543,18 @@ export default function App() {
     interRef.current = c
   }
 
+  const warpedRef = useRef(null)
+  if (!warpedRef.current) {
+    const c = document.createElement('canvas')
+    c.width = CANVAS_W; c.height = CANVAS_H
+    warpedRef.current = c
+  }
+
   const panDrag = useRef(false)
   const panLast = useRef({ x: 0, y: 0 })
   const dotDrag = useRef(null)
   const warpDotDrag = useRef(null)
+  const blurDotDrag = useRef(null)
   const ellipseDrag = useRef(null)
   const pinchDist = useRef(null)
   const spaceHeld = useRef(false)
@@ -479,7 +564,7 @@ export default function App() {
 
   // ── UI state ─────────────────────────────────────────────────────────────────
 
-  const [smearActive, setSmearActive] = useState(false)
+  const [mode, setMode] = useState('compose')
   const [activeColorId, setActiveColorId] = useState(INIT_COLORS[0].id)
   const [selectedDotIds, _setSelectedDotIds] = useState(() => new Set())
   const selectedDotIdsRef = useRef(new Set())
@@ -489,6 +574,7 @@ export default function App() {
     _setSelectedDotIds(next)
   }
   const [selectedWarpDotId, setSelectedWarpDotId] = useState(null)
+  const [selectedBlurDotId, setSelectedBlurDotId] = useState(null)
   const [paletteName, setPaletteName] = useState('')
   const [savedPalettes, setSavedPalettes] = useState(loadPalettes)
   const [wDraft, setWDraft] = useState(String(CANVAS_W))
@@ -500,19 +586,23 @@ export default function App() {
     const canvas = canvasRef.current
     const offscreen = offscreenRef.current
     const inter = interRef.current
-    if (!canvas || !offscreen || !inter) return
-    const IW = Math.max(1, Math.round(cW / 5))
-    const IH = Math.max(1, Math.round(cH / 5))
+    const warped = warpedRef.current
+    if (!canvas || !offscreen || !inter || !warped) return
     if (offscreen.width !== cW || offscreen.height !== cH) {
       offscreen.width = cW; offscreen.height = cH
     }
-    if (inter.width !== IW || inter.height !== IH) {
-      inter.width = IW; inter.height = IH
+    if (inter.width !== cW || inter.height !== cH) {
+      inter.width = cW; inter.height = cH
+    }
+    if (warped.width !== cW || warped.height !== cH) {
+      warped.width = cW; warped.height = cH
     }
     const offCtx = offscreen.getContext('2d')
     renderMeshGradient(inter, offCtx, present)
+    const warpedCtx = warped.getContext('2d')
+    applyWarp(warpedCtx, offscreen, present.warp)
     const ctx = canvas.getContext('2d')
-    applyWarp(ctx, offscreen, present.warp)
+    applyMotionBlur(ctx, warped, present.blurDots ?? [])
   }, [present])
 
   // ── Wheel zoom ────────────────────────────────────────────────────────────────
@@ -580,7 +670,7 @@ export default function App() {
     if (spaceHeld.current) {
       panDrag.current = true
       panLast.current = { x: e.clientX, y: e.clientY }
-    } else if (!smearActive) {
+    } else if (mode === 'compose') {
       const bs = { startX: e.clientX, startY: e.clientY, curX: e.clientX, curY: e.clientY, shiftKey: e.shiftKey }
       boxSelectRef.current = bs
       setBoxSelect({ ...bs })
@@ -603,10 +693,8 @@ export default function App() {
       panDrag.current = false
       return
     }
-    if (smearActive) {
-      setSelectedWarpDotId(null)
-      return
-    }
+    if (mode === 'warp') { setSelectedWarpDotId(null); return }
+    if (mode === 'blur') { setSelectedBlurDotId(null); return }
     const bs = boxSelectRef.current
     if (!bs) return
     boxSelectRef.current = null
@@ -627,7 +715,8 @@ export default function App() {
   function onMainDoubleClick(e) {
     if (e.target.closest('button, input, select, [data-no-pan]')) return
     const pos = viewportToCanvas(e.clientX, e.clientY)
-    if (smearActive) placeWarpDot(pos.x, pos.y)
+    if (mode === 'warp') placeWarpDot(pos.x, pos.y)
+    else if (mode === 'blur') placeBlurDot(pos.x, pos.y)
     else placeDot(pos.x, pos.y)
   }
 
@@ -707,7 +796,7 @@ export default function App() {
   function onEllipseHandlePointerDown(e, type) {
     e.stopPropagation()
     e.currentTarget.setPointerCapture(e.pointerId)
-    const dot = presentRef.current.dots.find(d => d.id === selectedDotId)
+    const dot = presentRef.current.dots.find(d => d.id === [...selectedDotIdsRef.current][0])
     if (!dot) return
     const canvasPos = viewportToCanvas(e.clientX, e.clientY)
     ellipseDrag.current = {
@@ -827,34 +916,159 @@ export default function App() {
     warpDotDrag.current = null
   }
 
-  function onWarpRadiusPointerDown(e, id) {
+  function onWarpEllipsePointerDown(e, id, type) {
     e.stopPropagation()
     e.currentTarget.setPointerCapture(e.pointerId)
     setSelectedWarpDotId(id)
-    warpDotDrag.current = { type: 'radius', id, snapshot: presentRef.current }
-  }
-  function onWarpRadiusPointerMove(e, id) {
-    const wd = warpDotDrag.current
-    if (!wd || wd.type !== 'radius' || wd.id !== id) return
     const dot = presentRef.current.warp.warpDots.find(d => d.id === id)
     if (!dot) return
     const cp = viewportToCanvas(e.clientX, e.clientY)
-    const r = Math.max(MIN_WARP_R, Math.hypot(cp.x - dot.x, cp.y - dot.y))
+    warpDotDrag.current = {
+      type, id,
+      snapshot: presentRef.current,
+      prevAngle: Math.atan2(cp.y - dot.y, cp.x - dot.x),
+    }
+  }
+  function onWarpEllipsePointerMove(e, id, type) {
+    const wd = warpDotDrag.current
+    if (!wd || wd.type !== type || wd.id !== id) return
+    const dot = presentRef.current.warp.warpDots.find(d => d.id === id)
+    if (!dot) return
+    const cp = viewportToCanvas(e.clientX, e.clientY)
+    const dx = cp.x - dot.x, dy = cp.y - dot.y
+    const theta = dot.theta ?? 0
+    const updated = { ...dot }
+    if (type === 'rx') {
+      updated.rx = Math.max(MIN_WARP_R, dx * Math.cos(theta) + dy * Math.sin(theta))
+      if (e.shiftKey) updated.ry = updated.rx
+    } else if (type === 'ry') {
+      updated.ry = Math.max(MIN_WARP_R, -dx * Math.sin(theta) + dy * Math.cos(theta))
+      if (e.shiftKey) updated.rx = updated.ry
+    } else if (type === 'rot') {
+      const cur = Math.atan2(dy, dx)
+      let delta = cur - wd.prevAngle
+      if (delta > Math.PI) delta -= 2 * Math.PI
+      else if (delta < -Math.PI) delta += 2 * Math.PI
+      updated.theta = theta + delta
+      wd.prevAngle = cur
+    }
     liveUpdate({
       ...presentRef.current,
       warp: {
         ...presentRef.current.warp,
-        warpDots: presentRef.current.warp.warpDots.map(d => d.id === id ? { ...d, r } : d),
+        warpDots: presentRef.current.warp.warpDots.map(d => d.id === id ? updated : d),
       },
     })
   }
-  function onWarpRadiusPointerUp(e, id) {
+  function onWarpEllipsePointerUp(e, id) {
     e.stopPropagation()
     const wd = warpDotDrag.current
     if (!wd || wd.id !== id) return
     setPast(p => [...p.slice(-(MAX_HISTORY - 1)), wd.snapshot])
     setFuture([])
     warpDotDrag.current = null
+  }
+
+  // ── Blur dot drag ─────────────────────────────────────────────────────────────
+
+  function onBlurDotBodyPointerDown(e, id) {
+    e.stopPropagation()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    setSelectedBlurDotId(id)
+    const dot = presentRef.current.blurDots.find(d => d.id === id)
+    if (!dot) return
+    blurDotDrag.current = { type: 'body', id, startX: dot.x, startY: dot.y, clientX: e.clientX, clientY: e.clientY, snapshot: presentRef.current }
+  }
+  function onBlurDotBodyPointerMove(e, id) {
+    const bd = blurDotDrag.current
+    if (!bd || bd.type !== 'body' || bd.id !== id) return
+    const dx = (e.clientX - bd.clientX) / viewRef.current.zoom
+    const dy = (e.clientY - bd.clientY) / viewRef.current.zoom
+    liveUpdate({
+      ...presentRef.current,
+      blurDots: presentRef.current.blurDots.map(d =>
+        d.id === id ? { ...d, x: bd.startX + dx, y: bd.startY + dy } : d
+      ),
+    })
+  }
+  function onBlurDotBodyPointerUp(e, id) {
+    e.stopPropagation()
+    const bd = blurDotDrag.current
+    if (!bd || bd.id !== id) return
+    setPast(p => [...p.slice(-(MAX_HISTORY - 1)), bd.snapshot])
+    setFuture([])
+    blurDotDrag.current = null
+  }
+
+  function onBlurArrowPointerDown(e, id) {
+    e.stopPropagation()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    setSelectedBlurDotId(id)
+    blurDotDrag.current = { type: 'arrow', id, snapshot: presentRef.current }
+  }
+  function onBlurArrowPointerMove(e, id) {
+    const bd = blurDotDrag.current
+    if (!bd || bd.type !== 'arrow' || bd.id !== id) return
+    const dot = presentRef.current.blurDots.find(d => d.id === id)
+    if (!dot) return
+    const cp = viewportToCanvas(e.clientX, e.clientY)
+    liveUpdate({
+      ...presentRef.current,
+      blurDots: presentRef.current.blurDots.map(d =>
+        d.id === id ? { ...d, dx: cp.x - dot.x, dy: cp.y - dot.y } : d
+      ),
+    })
+  }
+  function onBlurArrowPointerUp(e, id) {
+    e.stopPropagation()
+    const bd = blurDotDrag.current
+    if (!bd || bd.id !== id) return
+    setPast(p => [...p.slice(-(MAX_HISTORY - 1)), bd.snapshot])
+    setFuture([])
+    blurDotDrag.current = null
+  }
+
+  function onBlurEllipsePointerDown(e, id, type) {
+    e.stopPropagation()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    setSelectedBlurDotId(id)
+    const dot = presentRef.current.blurDots.find(d => d.id === id)
+    if (!dot) return
+    const cp = viewportToCanvas(e.clientX, e.clientY)
+    blurDotDrag.current = { type, id, snapshot: presentRef.current, prevAngle: Math.atan2(cp.y - dot.y, cp.x - dot.x) }
+  }
+  function onBlurEllipsePointerMove(e, id, type) {
+    const bd = blurDotDrag.current
+    if (!bd || bd.type !== type || bd.id !== id) return
+    const dot = presentRef.current.blurDots.find(d => d.id === id)
+    if (!dot) return
+    const cp = viewportToCanvas(e.clientX, e.clientY)
+    const dx = cp.x - dot.x, dy = cp.y - dot.y
+    const theta = dot.theta ?? 0
+    const updated = { ...dot }
+    if (type === 'rx') {
+      updated.rx = Math.max(MIN_WARP_R, dx * Math.cos(theta) + dy * Math.sin(theta))
+      if (e.shiftKey) updated.ry = updated.rx
+    } else if (type === 'ry') {
+      updated.ry = Math.max(MIN_WARP_R, -dx * Math.sin(theta) + dy * Math.cos(theta))
+      if (e.shiftKey) updated.rx = updated.ry
+    } else if (type === 'rot') {
+      const cur = Math.atan2(dy, dx)
+      let delta = cur - bd.prevAngle
+      if (delta > Math.PI) delta -= 2 * Math.PI
+      else if (delta < -Math.PI) delta += 2 * Math.PI
+      updated.theta = theta + delta
+      bd.prevAngle = cur
+    }
+    liveUpdate({ ...presentRef.current, blurDots: presentRef.current.blurDots.map(d => d.id === id ? updated : d) })
+  }
+  function onBlurEllipsePointerUp(e, id) {
+    e.stopPropagation()
+    const bd = blurDotDrag.current
+    if (!bd || bd.id !== id) return
+    setPast(p => [...p.slice(-(MAX_HISTORY - 1)), bd.snapshot])
+    setFuture([])
+    blurDotDrag.current = null
   }
 
   // ── Color operations ──────────────────────────────────────────────────────────
@@ -897,7 +1111,7 @@ export default function App() {
   }
 
   function placeWarpDot(x, y) {
-    const dot = { id: uid(), x, y, dx: 0, dy: 0, r: DEFAULT_WARP_R }
+    const dot = { id: uid(), x, y, dx: 0, dy: 0, rx: DEFAULT_WARP_R, ry: DEFAULT_WARP_R, theta: 0 }
     commit({ ...present, warp: { ...present.warp, warpDots: [...(present.warp.warpDots ?? []), dot] } })
     setSelectedWarpDotId(dot.id)
   }
@@ -906,6 +1120,21 @@ export default function App() {
     if (!selectedWarpDotId) return
     commit({ ...present, warp: { ...present.warp, warpDots: present.warp.warpDots.filter(d => d.id !== selectedWarpDotId) } })
     setSelectedWarpDotId(null)
+  }
+
+  function placeBlurDot(x, y) {
+    const dot = { id: uid(), x, y, dx: 0, dy: 0, rx: DEFAULT_WARP_R, ry: DEFAULT_WARP_R, theta: 0 }
+    commit({ ...present, blurDots: [...(present.blurDots ?? []), dot] })
+    setSelectedBlurDotId(dot.id)
+  }
+  function deleteSelectedBlurDot() {
+    if (!selectedBlurDotId) return
+    commit({ ...present, blurDots: (present.blurDots ?? []).filter(d => d.id !== selectedBlurDotId) })
+    setSelectedBlurDotId(null)
+  }
+  function clearBlurDots() {
+    commit({ ...present, blurDots: [] })
+    setSelectedBlurDotId(null)
   }
 
   function reassignDot(dotId, colorId) {
@@ -953,9 +1182,17 @@ export default function App() {
           ...d,
           x: d.x * sX, y: d.y * sY,
           dx: d.dx * sX, dy: d.dy * sY,
-          r: d.r * Math.sqrt(sX * sY),
+          rx: (d.rx ?? DEFAULT_WARP_R) * sX,
+          ry: (d.ry ?? DEFAULT_WARP_R) * sY,
         })),
       },
+      blurDots: (present.blurDots ?? []).map(d => ({
+        ...d,
+        x: d.x * sX, y: d.y * sY,
+        dx: d.dx * sX, dy: d.dy * sY,
+        rx: (d.rx ?? DEFAULT_WARP_R) * sX,
+        ry: (d.ry ?? DEFAULT_WARP_R) * sY,
+      })),
     })
   }
 
@@ -1027,14 +1264,27 @@ export default function App() {
         ellipseDrag.current = null
         return
       }
+      if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '0')) {
+        e.preventDefault()
+        const { zoom, pan } = viewRef.current
+        if (e.key === '0') {
+          setView({ zoom: 1, pan: { x: 0, y: 0 } })
+        } else {
+          const factor = (e.key === '=' || e.key === '+') ? ZOOM_STEP : 1 / ZOOM_STEP
+          const newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom * factor))
+          const s = newZoom / zoom
+          setView({ zoom: newZoom, pan: { x: pan.x * s, y: pan.y * s } })
+        }
+        return
+      }
       if (e.target.tagName === 'INPUT') return
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (smearActive && selectedWarpDotId) {
-          e.preventDefault()
-          deleteSelectedWarpDot()
-        } else if (!smearActive && selectedDotIds.size > 0) {
-          e.preventDefault()
-          deleteSelectedDots()
+        if (mode === 'warp' && selectedWarpDotId) {
+          e.preventDefault(); deleteSelectedWarpDot()
+        } else if (mode === 'blur' && selectedBlurDotId) {
+          e.preventDefault(); deleteSelectedBlurDot()
+        } else if (mode === 'compose' && selectedDotIds.size > 0) {
+          e.preventDefault(); deleteSelectedDots()
         }
       }
       if ((e.key === 'z' || e.key === 'Z') && (e.metaKey || e.ctrlKey)) {
@@ -1044,7 +1294,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selectedDotIds, selectedWarpDotId, smearActive, past, future])
+  }, [selectedDotIds, selectedWarpDotId, selectedBlurDotId, mode, past, future])
 
   // ── Derived ───────────────────────────────────────────────────────────────────
 
@@ -1055,9 +1305,12 @@ export default function App() {
     ? present.dots.find(d => d.id === [...selectedDotIds][0]) ?? null
     : null
   const cssFilter = buildCSSFilter(present.filters)
+  const blurPx = present.filters.blur * 0.2
+  const blurScale = blurPx > 0 ? 1 + (blurPx * 3) / Math.min(cW, cH) : 1
   const canvasCSS = {
     display: 'block',
     filter: cssFilter,
+    ...(blurScale > 1 && { transform: `scale(${blurScale.toFixed(4)})` }),
     ...(present.background.transparent && {
       backgroundImage: 'repeating-conic-gradient(#666 0% 25%, #444 0% 50%)',
       backgroundSize: '16px 16px',
@@ -1215,6 +1468,7 @@ export default function App() {
             <FilterSlider label="Blur" value={present.filters.blur} min={0} max={100} unit="%" onChange={v => updateFilter('blur', v)} />
             <FilterSlider label="Contrast" value={present.filters.contrast} min={100} max={200} unit="%" onChange={v => updateFilter('contrast', v)} />
             <FilterSlider label="Brightness" value={present.filters.brightness} min={100} max={200} unit="%" onChange={v => updateFilter('brightness', v)} />
+            <FilterSlider label="Saturation" value={present.filters.saturation ?? 100} min={0} max={200} unit="%" onChange={v => updateFilter('saturation', v)} />
             <FilterSlider label="Hue rotate" value={present.filters.hue} min={0} max={360} unit="°" onChange={v => updateFilter('hue', v)} />
             <button onClick={resetFilters}
               className="w-full mt-1 py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
@@ -1264,7 +1518,7 @@ export default function App() {
       <main
         ref={mainRef}
         className="flex-1 relative overflow-hidden"
-        style={{ cursor: spaceDown ? 'grab' : smearActive || activeColorId ? 'crosshair' : 'default' }}
+        style={{ cursor: spaceDown ? 'grab' : mode !== 'compose' || activeColorId ? 'crosshair' : 'default' }}
         onPointerDown={onMainPointerDown}
         onPointerMove={onMainPointerMove}
         onPointerUp={onMainPointerUp}
@@ -1282,32 +1536,31 @@ export default function App() {
             borderRadius: 10,
             backdropFilter: 'blur(10px)',
           }}>
-            {[['Compose', false], ['Warp', true]].map(([label, isWarp]) => (
-              <button key={label} data-no-pan=""
-                onClick={() => {
-                  setSmearActive(isWarp)
-                  if (isWarp) setSelectedDotIds(new Set())
-                  else setSelectedWarpDotId(null)
-                }}
-                style={{
-                  padding: '4px 14px',
-                  borderRadius: 7,
-                  fontSize: 11, fontWeight: 500,
-                  border: 'none', cursor: 'pointer',
-                  transition: 'background 0.15s, color 0.15s',
-                  background: smearActive === isWarp
-                    ? 'rgba(139,92,246,0.28)'
-                    : 'transparent',
-                  color: smearActive === isWarp
-                    ? 'rgba(196,181,253,1)'
-                    : 'rgba(255,255,255,0.38)',
-                  boxShadow: smearActive === isWarp
-                    ? 'inset 0 0 0 1px rgba(139,92,246,0.4)'
-                    : 'none',
-                }}>
-                {label}
-              </button>
-            ))}
+            {['Compose', 'Warp', 'Blur'].map(label => {
+              const m = label.toLowerCase()
+              const active = mode === m
+              return (
+                <button key={label} data-no-pan=""
+                  onClick={() => {
+                    setMode(m)
+                    if (m !== 'compose') setSelectedDotIds(new Set())
+                    if (m !== 'warp') setSelectedWarpDotId(null)
+                    if (m !== 'blur') setSelectedBlurDotId(null)
+                  }}
+                  style={{
+                    padding: '4px 14px',
+                    borderRadius: 7,
+                    fontSize: 11, fontWeight: 500,
+                    border: 'none', cursor: 'pointer',
+                    transition: 'background 0.15s, color 0.15s',
+                    background: active ? 'rgba(139,92,246,0.28)' : 'transparent',
+                    color: active ? 'rgba(196,181,253,1)' : 'rgba(255,255,255,0.38)',
+                    boxShadow: active ? 'inset 0 0 0 1px rgba(139,92,246,0.4)' : 'none',
+                  }}>
+                  {label}
+                </button>
+              )
+            })}
           </div>
         </div>
 
@@ -1320,6 +1573,7 @@ export default function App() {
             willChange: 'transform',
             pointerEvents: 'auto',
             boxShadow: '0 24px 80px rgba(0,0,0,0.75), 0 8px 24px rgba(0,0,0,0.5)',
+            overflow: 'hidden',
           }}>
             <canvas ref={canvasRef} width={cW} height={cH} style={canvasCSS} />
 
@@ -1343,7 +1597,7 @@ export default function App() {
             )}
 
             {/* Dots */}
-            {!smearActive && present.dots.map(dot => {
+            {mode === 'compose' && present.dots.map(dot => {
               const color = present.colors.find(c => c.id === dot.colorId)
               if (!color) return null
               const colorIndex = present.colors.indexOf(color)
@@ -1379,7 +1633,7 @@ export default function App() {
             })}
 
             {/* Warp dots overlay */}
-            {smearActive && (
+            {mode === 'warp' && (
               <svg style={{
                 position: 'absolute', left: 0, top: 0,
                 width: cW, height: cH,
@@ -1389,18 +1643,30 @@ export default function App() {
                   const sel = selectedWarpDotId === wd.id
                   const ax = wd.x + wd.dx, ay = wd.y + wd.dy
                   const hasDelta = wd.dx !== 0 || wd.dy !== 0
+                  const theta = wd.theta ?? 0
+                  const rx = wd.rx ?? DEFAULT_WARP_R
+                  const ry = wd.ry ?? DEFAULT_WARP_R
+                  const cosT = Math.cos(theta), sinT = Math.sin(theta)
+                  const rxHx = wd.x + rx * cosT, rxHy = wd.y + rx * sinT
+                  const ryHx = wd.x - ry * sinT, ryHy = wd.y + ry * cosT
+                  const rotHx = wd.x + (rx + ROT_HANDLE_OFFSET) * cosT
+                  const rotHy = wd.y + (rx + ROT_HANDLE_OFFSET) * sinT
                   return (
                     <g key={wd.id}>
-                      <circle cx={wd.x} cy={wd.y} r={wd.r}
+                      {/* Dashed ellipse */}
+                      <ellipse cx={wd.x} cy={wd.y} rx={rx} ry={ry}
                         fill={sel ? 'rgba(139,92,246,0.06)' : 'rgba(255,255,255,0.02)'}
                         stroke={sel ? 'rgba(139,92,246,0.4)' : 'rgba(255,255,255,0.12)'}
                         strokeWidth={1} strokeDasharray="4 3" pointerEvents="none"
+                        transform={`rotate(${theta * 180 / Math.PI}, ${wd.x}, ${wd.y})`}
                       />
+                      {/* Arrow line */}
                       {hasDelta && (
                         <line x1={wd.x} y1={wd.y} x2={ax} y2={ay}
                           stroke="rgba(255,255,255,0.55)" strokeWidth={1.5} pointerEvents="none"
                         />
                       )}
+                      {/* Dot body */}
                       <circle cx={wd.x} cy={wd.y} r={6}
                         fill={sel ? 'rgb(139,92,246)' : 'rgba(255,255,255,0.8)'}
                         stroke={sel ? 'rgba(109,40,217,0.9)' : 'rgba(0,0,0,0.4)'}
@@ -1410,6 +1676,7 @@ export default function App() {
                         onPointerMove={e => onWarpDotBodyPointerMove(e, wd.id)}
                         onPointerUp={e => onWarpDotBodyPointerUp(e, wd.id)}
                       />
+                      {/* Arrow tip */}
                       <circle cx={ax} cy={ay} r={5}
                         fill="rgba(251,191,36,0.9)" stroke="rgba(0,0,0,0.4)" strokeWidth={1.5}
                         style={{ cursor: 'grab', pointerEvents: 'all' }}
@@ -1417,14 +1684,112 @@ export default function App() {
                         onPointerMove={e => onWarpArrowPointerMove(e, wd.id)}
                         onPointerUp={e => onWarpArrowPointerUp(e, wd.id)}
                       />
+                      {/* Ellipse handles — only when selected */}
                       {sel && (
-                        <circle cx={wd.x + wd.r} cy={wd.y} r={5}
-                          fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
-                          style={{ cursor: 'ew-resize', pointerEvents: 'all' }}
-                          onPointerDown={e => onWarpRadiusPointerDown(e, wd.id)}
-                          onPointerMove={e => onWarpRadiusPointerMove(e, wd.id)}
-                          onPointerUp={e => onWarpRadiusPointerUp(e, wd.id)}
+                        <>
+                          <line x1={rxHx} y1={rxHy} x2={rotHx} y2={rotHy}
+                            stroke="rgba(255,255,255,0.2)" strokeWidth={1} pointerEvents="none"
+                          />
+                          <circle cx={rxHx} cy={rxHy} r={5}
+                            fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
+                            style={{ cursor: 'col-resize', pointerEvents: 'all' }}
+                            onPointerDown={e => onWarpEllipsePointerDown(e, wd.id, 'rx')}
+                            onPointerMove={e => onWarpEllipsePointerMove(e, wd.id, 'rx')}
+                            onPointerUp={e => onWarpEllipsePointerUp(e, wd.id)}
+                          />
+                          <circle cx={ryHx} cy={ryHy} r={5}
+                            fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
+                            style={{ cursor: 'row-resize', pointerEvents: 'all' }}
+                            onPointerDown={e => onWarpEllipsePointerDown(e, wd.id, 'ry')}
+                            onPointerMove={e => onWarpEllipsePointerMove(e, wd.id, 'ry')}
+                            onPointerUp={e => onWarpEllipsePointerUp(e, wd.id)}
+                          />
+                          <circle cx={rotHx} cy={rotHy} r={5}
+                            fill="rgb(139,92,246)" stroke="rgba(255,255,255,0.5)" strokeWidth={1.5}
+                            style={{ cursor: 'grab', pointerEvents: 'all' }}
+                            onPointerDown={e => onWarpEllipsePointerDown(e, wd.id, 'rot')}
+                            onPointerMove={e => onWarpEllipsePointerMove(e, wd.id, 'rot')}
+                            onPointerUp={e => onWarpEllipsePointerUp(e, wd.id)}
+                          />
+                        </>
+                      )}
+                    </g>
+                  )
+                })}
+              </svg>
+            )}
+
+            {/* Blur dots overlay */}
+            {mode === 'blur' && (
+              <svg style={{ position: 'absolute', left: 0, top: 0, width: cW, height: cH, overflow: 'visible', pointerEvents: 'none' }}>
+                {(present.blurDots ?? []).map(bd => {
+                  const sel = selectedBlurDotId === bd.id
+                  const ax = bd.x + bd.dx, ay = bd.y + bd.dy
+                  const hasDelta = bd.dx !== 0 || bd.dy !== 0
+                  const theta = bd.theta ?? 0
+                  const rx = bd.rx ?? DEFAULT_WARP_R
+                  const ry = bd.ry ?? DEFAULT_WARP_R
+                  const cosT = Math.cos(theta), sinT = Math.sin(theta)
+                  const rxHx = bd.x + rx * cosT, rxHy = bd.y + rx * sinT
+                  const ryHx = bd.x - ry * sinT, ryHy = bd.y + ry * cosT
+                  const rotHx = bd.x + (rx + ROT_HANDLE_OFFSET) * cosT
+                  const rotHy = bd.y + (rx + ROT_HANDLE_OFFSET) * sinT
+                  return (
+                    <g key={bd.id}>
+                      <ellipse cx={bd.x} cy={bd.y} rx={rx} ry={ry}
+                        fill={sel ? 'rgba(249,115,22,0.06)' : 'rgba(255,255,255,0.02)'}
+                        stroke={sel ? 'rgba(249,115,22,0.4)' : 'rgba(255,255,255,0.12)'}
+                        strokeWidth={1} strokeDasharray="4 3" pointerEvents="none"
+                        transform={`rotate(${theta * 180 / Math.PI}, ${bd.x}, ${bd.y})`}
+                      />
+                      {hasDelta && (
+                        <line x1={bd.x} y1={bd.y} x2={ax} y2={ay}
+                          stroke="rgba(255,255,255,0.55)" strokeWidth={1.5} pointerEvents="none"
                         />
+                      )}
+                      <circle cx={bd.x} cy={bd.y} r={6}
+                        fill={sel ? 'rgb(249,115,22)' : 'rgba(255,255,255,0.8)'}
+                        stroke={sel ? 'rgba(234,88,12,0.9)' : 'rgba(0,0,0,0.4)'}
+                        strokeWidth={1.5}
+                        style={{ cursor: 'move', pointerEvents: 'all' }}
+                        onPointerDown={e => onBlurDotBodyPointerDown(e, bd.id)}
+                        onPointerMove={e => onBlurDotBodyPointerMove(e, bd.id)}
+                        onPointerUp={e => onBlurDotBodyPointerUp(e, bd.id)}
+                      />
+                      <circle cx={ax} cy={ay} r={5}
+                        fill="rgba(251,191,36,0.9)" stroke="rgba(0,0,0,0.4)" strokeWidth={1.5}
+                        style={{ cursor: 'grab', pointerEvents: 'all' }}
+                        onPointerDown={e => onBlurArrowPointerDown(e, bd.id)}
+                        onPointerMove={e => onBlurArrowPointerMove(e, bd.id)}
+                        onPointerUp={e => onBlurArrowPointerUp(e, bd.id)}
+                      />
+                      {sel && (
+                        <>
+                          <line x1={rxHx} y1={rxHy} x2={rotHx} y2={rotHy}
+                            stroke="rgba(255,255,255,0.2)" strokeWidth={1} pointerEvents="none"
+                          />
+                          <circle cx={rxHx} cy={rxHy} r={5}
+                            fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
+                            style={{ cursor: 'col-resize', pointerEvents: 'all' }}
+                            onPointerDown={e => onBlurEllipsePointerDown(e, bd.id, 'rx')}
+                            onPointerMove={e => onBlurEllipsePointerMove(e, bd.id, 'rx')}
+                            onPointerUp={e => onBlurEllipsePointerUp(e, bd.id)}
+                          />
+                          <circle cx={ryHx} cy={ryHy} r={5}
+                            fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
+                            style={{ cursor: 'row-resize', pointerEvents: 'all' }}
+                            onPointerDown={e => onBlurEllipsePointerDown(e, bd.id, 'ry')}
+                            onPointerMove={e => onBlurEllipsePointerMove(e, bd.id, 'ry')}
+                            onPointerUp={e => onBlurEllipsePointerUp(e, bd.id)}
+                          />
+                          <circle cx={rotHx} cy={rotHy} r={5}
+                            fill="rgb(249,115,22)" stroke="rgba(255,255,255,0.5)" strokeWidth={1.5}
+                            style={{ cursor: 'grab', pointerEvents: 'all' }}
+                            onPointerDown={e => onBlurEllipsePointerDown(e, bd.id, 'rot')}
+                            onPointerMove={e => onBlurEllipsePointerMove(e, bd.id, 'rot')}
+                            onPointerUp={e => onBlurEllipsePointerUp(e, bd.id)}
+                          />
+                        </>
                       )}
                     </g>
                   )
@@ -1435,7 +1800,7 @@ export default function App() {
         </div>
 
         {/* Ellipse + resize/rotate handles — only for single selection */}
-        {selectedDotIds.size === 1 && selectedDot && !smearActive && mainRef.current && (() => {
+        {selectedDotIds.size === 1 && selectedDot && mode === 'compose' && mainRef.current && (() => {
           const sc = canvasToViewport(selectedDot.x, selectedDot.y)
           const rx = selectedDot.rx ?? DEFAULT_RX
           const ry = selectedDot.ry ?? DEFAULT_RY
@@ -1517,7 +1882,7 @@ export default function App() {
         })()}
 
         {/* Dot tooltip — single selection */}
-        {selectedDotIds.size === 1 && selectedDot && !smearActive && mainRef.current && (() => {
+        {selectedDotIds.size === 1 && selectedDot && mode === 'compose' && mainRef.current && (() => {
           const { width, height } = mainRef.current.getBoundingClientRect()
           const tx = width / 2 + view.pan.x + (selectedDot.x - cW / 2) * view.zoom
           const ty = height / 2 + view.pan.y + (selectedDot.y - cH / 2) * view.zoom
@@ -1588,7 +1953,7 @@ export default function App() {
         })()}
 
         {/* Multi-select tooltip */}
-        {selectedDotIds.size > 1 && !smearActive && mainRef.current && (() => {
+        {selectedDotIds.size > 1 && mode === 'compose' && mainRef.current && (() => {
           const selDots = present.dots.filter(d => selectedDotIds.has(d.id))
           const cx = selDots.reduce((s, d) => s + d.x, 0) / selDots.length
           const cy = selDots.reduce((s, d) => s + d.y, 0) / selDots.length
@@ -1657,14 +2022,19 @@ export default function App() {
         })()}
 
         {/* Zoom badge */}
-        <div className="absolute bottom-4 right-4 select-none text-[11px] tabular-nums"
+        <button
+          onClick={() => setView({ zoom: 1, pan: { x: 0, y: 0 } })}
+          className="absolute bottom-4 right-4 select-none text-[11px] tabular-nums"
           style={{
             color: 'rgba(255,255,255,0.35)', background: 'rgba(0,0,0,0.45)',
             backdropFilter: 'blur(6px)', padding: '3px 9px', borderRadius: 6,
             border: '1px solid rgba(255,255,255,0.07)',
-          }}>
+            cursor: 'pointer',
+          }}
+          title="Reset zoom (⌘0)"
+        >
           {Math.round(view.zoom * 100)}%
-        </div>
+        </button>
       </main>
 
     </div>
