@@ -13,6 +13,10 @@ const MAX_HISTORY = 50
 const LS_KEY = 'hazy-palettes'
 const WARP_DENSITIES = [3, 5, 8, 10]
 const INIT_FILTERS = { grain: 0, blur: 0, contrast: 100, brightness: 100, hue: 0 }
+const DEFAULT_RX = 280
+const DEFAULT_RY = 280
+const MIN_RADIUS = 20
+const ROT_HANDLE_OFFSET = 28
 const COLOR_DEFAULTS = ['#ff6b6b', '#4fc3f7', '#a29bfe', '#fdcb6e', '#55efc4', '#fd79a8', '#e17055', '#74b9ff']
 const LABELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
@@ -73,16 +77,17 @@ const INIT_COLORS = [
 ]
 
 const INIT_DOTS = [
-  { id: 'da', colorId: 'ca', x: 200, y: 150 },
-  { id: 'db', colorId: 'cb', x: 600, y: 150 },
-  { id: 'dc', colorId: 'cc', x: 200, y: 450 },
-  { id: 'dd', colorId: 'cd', x: 600, y: 450 },
+  { id: 'da', colorId: 'ca', x: 200, y: 150, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
+  { id: 'db', colorId: 'cb', x: 600, y: 150, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
+  { id: 'dc', colorId: 'cc', x: 200, y: 450, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
+  { id: 'dd', colorId: 'cd', x: 600, y: 450, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
 ]
 
 const INIT_WARP = { N: 5, displacements: makeDisplacements(5), intensity: 100 }
 
 const INIT_DOC = {
   background: { hex: '#050510', transparent: false },
+  sharpness: 2,
   colors: INIT_COLORS,
   dots: INIT_DOTS,
   warp: INIT_WARP,
@@ -91,10 +96,11 @@ const INIT_DOC = {
 
 // ─── Render pipeline ──────────────────────────────────────────────────────────
 
-function renderMeshGradient(interCanvas, offCtx, { background, colors, dots }) {
+function renderMeshGradient(interCanvas, offCtx, { background, sharpness = 2, colors, dots }) {
   const W = CANVAS_W, H = CANVAS_H
   const IW = INTER_W, IH = INTER_H
   const scaleX = W / IW, scaleY = H / IH
+  const p = sharpness
 
   const colorMap = {}
   colors.forEach(c => { colorMap[c.id] = c })
@@ -103,7 +109,14 @@ function renderMeshGradient(interCanvas, offCtx, { background, colors, dots }) {
     const color = colorMap[dot.colorId]
     if (!color) return null
     const { r, g, b } = hexToRgb(color.hex)
-    return { x: dot.x / scaleX, y: dot.y / scaleY, r, g, b }
+    const theta = dot.theta ?? 0
+    return {
+      x: dot.x / scaleX, y: dot.y / scaleY,
+      rx: (dot.rx ?? DEFAULT_RX) / scaleX,
+      ry: (dot.ry ?? DEFAULT_RY) / scaleY,
+      cosT: Math.cos(theta), sinT: Math.sin(theta),
+      r, g, b,
+    }
   }).filter(Boolean)
 
   offCtx.clearRect(0, 0, W, H)
@@ -127,16 +140,25 @@ function renderMeshGradient(interCanvas, offCtx, { background, colors, dots }) {
         const pt = cpts[i]
         const dx = px - pt.x, dy = py - pt.y
         const d2 = dx * dx + dy * dy
-        if (d2 < 1) { rSum = pt.r; gSum = pt.g; bSum = pt.b; wSum = 1; break }
-        const w = 1 / d2
+        if (d2 < 0.25) { rSum = pt.r; gSum = pt.g; bSum = pt.b; wSum = 1; break }
+        // Rotate into ellipse-local space, compute Mahalanobis distance
+        const ex = dx * pt.cosT + dy * pt.sinT
+        const ey = -dx * pt.sinT + dy * pt.cosT
+        const dM2 = (ex * ex) / (pt.rx * pt.rx) + (ey * ey) / (pt.ry * pt.ry)
+        const w = Math.exp(-dM2 * p)
         rSum += pt.r * w; gSum += pt.g * w; bSum += pt.b * w; wSum += w
       }
 
       const idx = (py * IW + px) << 2
-      data[idx]   = (rSum / wSum + 0.5) | 0
-      data[idx+1] = (gSum / wSum + 0.5) | 0
-      data[idx+2] = (bSum / wSum + 0.5) | 0
-      data[idx+3] = 255
+      if (wSum < 1e-10) {
+        // Outside all ellipses — transparent so background shows through
+        data[idx] = 0; data[idx+1] = 0; data[idx+2] = 0; data[idx+3] = 0
+      } else {
+        data[idx]   = (rSum / wSum + 0.5) | 0
+        data[idx+1] = (gSum / wSum + 0.5) | 0
+        data[idx+2] = (bSum / wSum + 0.5) | 0
+        data[idx+3] = 255
+      }
     }
   }
 
@@ -436,14 +458,14 @@ function WarpGrid({ N, displacements, onPointerDown, onPointerMove, onPointerUp 
 
 // ─── FilterSlider ─────────────────────────────────────────────────────────────
 
-function FilterSlider({ label, value, min, max, unit, onChange }) {
+function FilterSlider({ label, value, min, max, step = 1, unit, onChange }) {
   return (
     <div className="mb-3">
       <div className="flex justify-between items-center mb-1">
         <span className="text-[10px] text-white/40 uppercase tracking-wide">{label}</span>
         <span className="text-[10px] text-white/35 tabular-nums">{value}{unit}</span>
       </div>
-      <input type="range" min={min} max={max} value={value}
+      <input type="range" min={min} max={max} step={step} value={value}
         onChange={e => onChange(+e.target.value)}
         className="w-full accent-violet-400"
         style={{ cursor: 'pointer' }} />
@@ -512,10 +534,9 @@ export default function App() {
 
   const panDrag = useRef(false)
   const panLast = useRef({ x: 0, y: 0 })
-  const panStart = useRef({ x: 0, y: 0 })
-  const panMoved = useRef(false)
   const dotDrag = useRef(null)
   const gridDrag = useRef(null)
+  const ellipseDrag = useRef(null)
   const pinchDist = useRef(null)
 
   // ── UI state ─────────────────────────────────────────────────────────────────
@@ -569,34 +590,51 @@ export default function App() {
     return { x: ox / zoom + CANVAS_W / 2, y: oy / zoom + CANVAS_H / 2 }
   }
 
+  function canvasToViewport(cx, cy) {
+    const { width, height } = mainRef.current.getBoundingClientRect()
+    return {
+      x: width / 2 + view.pan.x + (cx - CANVAS_W / 2) * view.zoom,
+      y: height / 2 + view.pan.y + (cy - CANVAS_H / 2) * view.zoom,
+    }
+  }
+
   // ── Canvas pan + click-to-place ────────────────────────────────────────────────
 
+  const clickMoved = useRef(false)
+
+  const pointerDownOnCanvas = useRef(false)
+
   function onMainPointerDown(e) {
-    if (e.target.closest('button, input, select, [data-no-pan]')) return
+    if (e.target.closest('button, input, select, [data-no-pan]')) {
+      pointerDownOnCanvas.current = false
+      return
+    }
+    pointerDownOnCanvas.current = true
     panDrag.current = true
-    panMoved.current = false
+    clickMoved.current = false
     panLast.current = { x: e.clientX, y: e.clientY }
-    panStart.current = { x: e.clientX, y: e.clientY }
     e.currentTarget.setPointerCapture(e.pointerId)
   }
   function onMainPointerMove(e) {
     if (!panDrag.current) return
-    const dx = e.clientX - panStart.current.x
-    const dy = e.clientY - panStart.current.y
-    if (Math.hypot(dx, dy) > 4) panMoved.current = true
-    const mdx = e.clientX - panLast.current.x
-    const mdy = e.clientY - panLast.current.y
+    const dx = e.clientX - panLast.current.x
+    const dy = e.clientY - panLast.current.y
+    if (Math.hypot(dx, dy) > 4) clickMoved.current = true
     panLast.current = { x: e.clientX, y: e.clientY }
     const v = viewRef.current
-    setView({ ...v, pan: { x: v.pan.x + mdx, y: v.pan.y + mdy } })
+    setView({ ...v, pan: { x: v.pan.x + dx, y: v.pan.y + dy } })
   }
-  function onMainPointerUp(e) {
-    if (panDrag.current && !panMoved.current && !smearActive) {
-      // Click on canvas → place a dot
-      const pos = viewportToCanvas(e.clientX, e.clientY)
-      placeDot(pos.x, pos.y)
-    }
+  function onMainPointerUp() {
+    if (pointerDownOnCanvas.current && !clickMoved.current && selectedDotId) setSelectedDotId(null)
     panDrag.current = false
+    pointerDownOnCanvas.current = false
+  }
+
+  function onMainDoubleClick(e) {
+    if (e.target.closest('button, input, select, [data-no-pan]')) return
+    if (smearActive) return
+    const pos = viewportToCanvas(e.clientX, e.clientY)
+    placeDot(pos.x, pos.y)
   }
 
   // ── Pinch ─────────────────────────────────────────────────────────────────────
@@ -627,7 +665,6 @@ export default function App() {
     const dot = presentRef.current.dots.find(d => d.id === id)
     dotDrag.current = { id, startX: dot.x, startY: dot.y, clientX: e.clientX, clientY: e.clientY, snapshot: presentRef.current }
     setSelectedDotId(id)
-    panMoved.current = true // prevent click-to-place on pointer up
   }
   function onDotPointerMove(e, id) {
     const dd = dotDrag.current
@@ -642,11 +679,72 @@ export default function App() {
     })
   }
   function onDotPointerUp(e, id) {
+    e.stopPropagation()
     const dd = dotDrag.current
     if (!dd || dd.id !== id) return
     setPast(p => [...p.slice(-(MAX_HISTORY - 1)), dd.snapshot])
     setFuture([])
     dotDrag.current = null
+  }
+
+  // ── Ellipse handle drag ───────────────────────────────────────────────────────
+
+  function onEllipseHandlePointerDown(e, type) {
+    e.stopPropagation()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const dot = presentRef.current.dots.find(d => d.id === selectedDotId)
+    if (!dot) return
+    const canvasPos = viewportToCanvas(e.clientX, e.clientY)
+    ellipseDrag.current = {
+      type,
+      dotId: dot.id,
+      snapshot: presentRef.current,
+      prevAngle: Math.atan2(canvasPos.y - dot.y, canvasPos.x - dot.x),
+    }
+  }
+
+  function onEllipseHandlePointerMove(e, type) {
+    const ed = ellipseDrag.current
+    if (!ed || ed.type !== type) return
+    const dot = presentRef.current.dots.find(d => d.id === ed.dotId)
+    if (!dot) return
+    const canvasPos = viewportToCanvas(e.clientX, e.clientY)
+    const dx = canvasPos.x - dot.x
+    const dy = canvasPos.y - dot.y
+    const theta = dot.theta ?? 0
+    const updatedDot = { ...dot }
+
+    if (type === 'rx') {
+      const projected = dx * Math.cos(theta) + dy * Math.sin(theta)
+      updatedDot.rx = Math.max(MIN_RADIUS, projected)
+      if (e.shiftKey) updatedDot.ry = updatedDot.rx
+    } else if (type === 'ry') {
+      const projected = -dx * Math.sin(theta) + dy * Math.cos(theta)
+      updatedDot.ry = Math.max(MIN_RADIUS, projected)
+      if (e.shiftKey) updatedDot.rx = updatedDot.ry
+    } else if (type === 'rot') {
+      const currentAngle = Math.atan2(dy, dx)
+      let delta = currentAngle - ed.prevAngle
+      // Clamp to [-π, π] to avoid jumps when crossing ±180°
+      if (delta > Math.PI) delta -= 2 * Math.PI
+      else if (delta < -Math.PI) delta += 2 * Math.PI
+      updatedDot.theta = theta + delta
+      ed.prevAngle = currentAngle
+    }
+
+    liveUpdate({
+      ...presentRef.current,
+      dots: presentRef.current.dots.map(d => d.id === ed.dotId ? updatedDot : d),
+    })
+  }
+
+  function onEllipseHandlePointerUp(e, type) {
+    e.stopPropagation()
+    const ed = ellipseDrag.current
+    if (!ed || ed.type !== type) return
+    setPast(p => [...p.slice(-(MAX_HISTORY - 1)), ed.snapshot])
+    setFuture([])
+    ellipseDrag.current = null
   }
 
   // ── Warp handle drag ──────────────────────────────────────────────────────────
@@ -708,7 +806,7 @@ export default function App() {
 
   function placeDot(x, y) {
     if (!activeColorId || !present.colors.find(c => c.id === activeColorId)) return
-    const dot = { id: uid(), colorId: activeColorId, x, y }
+    const dot = { id: uid(), colorId: activeColorId, x, y, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 }
     commit({ ...present, dots: [...present.dots, dot] })
     setSelectedDotId(dot.id)
   }
@@ -797,11 +895,23 @@ export default function App() {
     setSelectedDotId(null)
     if (p.colors?.length) setActiveColorId(p.colors[0].id)
   }
+  function deletePalette(name) {
+    const all = loadPalettes()
+    delete all[name]
+    writePalettes(all)
+    setSavedPalettes({ ...all })
+  }
 
   // ── Keyboard ──────────────────────────────────────────────────────────────────
 
   useEffect(() => {
     function onKey(e) {
+      if (e.key === 'Escape' && ellipseDrag.current) {
+        e.preventDefault()
+        syncPresent(ellipseDrag.current.snapshot)
+        ellipseDrag.current = null
+        return
+      }
       if (e.target.tagName === 'INPUT') return
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDotId) {
         e.preventDefault()
@@ -884,6 +994,12 @@ export default function App() {
                 label="Transparent" />
             </div>
 
+            {/* Sharpness */}
+            <div className="mb-3 pb-3 border-b border-white/[0.06]">
+              <FilterSlider label="Sharpness" value={present.sharpness} min={1} max={8} step={0.5} unit=""
+                onChange={v => commit({ ...present, sharpness: v })} />
+            </div>
+
             {/* Palette */}
             <div className="mb-2">
               <div className="text-[10px] text-white/30 mb-2 uppercase tracking-wide">
@@ -926,13 +1042,22 @@ export default function App() {
                 </button>
               </div>
               {paletteNames.length > 0 && (
-                <select defaultValue="" key={paletteNames.join(',')}
-                  onChange={e => { if (e.target.value) loadPaletteByName(e.target.value) }}
-                  className="w-full bg-white/[0.05] border border-white/[0.08] rounded px-2 py-1 text-[11px] text-white/45 outline-none focus:border-white/20 cursor-pointer"
-                  style={{ colorScheme: 'dark' }}>
-                  <option value="" disabled>Load palette…</option>
-                  {paletteNames.map(n => <option key={n} value={n}>{n}</option>)}
-                </select>
+                <div className="flex flex-col gap-0.5">
+                  {paletteNames.map(n => (
+                    <div key={n} className="flex items-center gap-1 group">
+                      <button
+                        onClick={() => loadPaletteByName(n)}
+                        className="flex-1 min-w-0 text-left px-2 py-1 rounded text-[11px] text-white/50 hover:text-white/80 hover:bg-white/[0.06] transition-colors truncate">
+                        {n}
+                      </button>
+                      <button
+                        onClick={() => deletePalette(n)}
+                        className="shrink-0 p-1 rounded text-white/20 hover:text-red-400 hover:bg-white/[0.05] transition-colors opacity-0 group-hover:opacity-100">
+                        <IconTrash />
+                      </button>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
           </Section>
@@ -1018,6 +1143,7 @@ export default function App() {
         onPointerMove={onMainPointerMove}
         onPointerUp={onMainPointerUp}
         onPointerLeave={() => { panDrag.current = false }}
+        onDoubleClick={onMainDoubleClick}
         onTouchStart={onTouchStart}
         onTouchMove={onTouchMove}
       >
@@ -1117,6 +1243,88 @@ export default function App() {
             )}
           </div>
         </div>
+
+        {/* Ellipse + resize/rotate handles for selected dot */}
+        {selectedDot && !smearActive && mainRef.current && (() => {
+          const sc = canvasToViewport(selectedDot.x, selectedDot.y)
+          const rx = selectedDot.rx ?? DEFAULT_RX
+          const ry = selectedDot.ry ?? DEFAULT_RY
+          const theta = selectedDot.theta ?? 0
+          const sRx = rx * view.zoom
+          const sRy = ry * view.zoom
+          const cosT = Math.cos(theta)
+          const sinT = Math.sin(theta)
+
+          // Handle screen positions
+          const rxHx = sc.x + sRx * cosT
+          const rxHy = sc.y + sRx * sinT
+          const ryHx = sc.x - sRy * sinT
+          const ryHy = sc.y + sRy * cosT
+          const rotHx = sc.x + (sRx + ROT_HANDLE_OFFSET) * cosT
+          const rotHy = sc.y + (sRx + ROT_HANDLE_OFFSET) * sinT
+
+          const handleBase = {
+            position: 'absolute',
+            width: 10, height: 10, borderRadius: '50%',
+            transform: 'translate(-50%, -50%)',
+            zIndex: 22, touchAction: 'none',
+            border: '1.5px solid rgba(0,0,0,0.35)',
+          }
+
+          return (
+            <>
+              {/* Dashed ellipse outline */}
+              <div style={{
+                position: 'absolute',
+                left: sc.x - sRx, top: sc.y - sRy,
+                width: sRx * 2, height: sRy * 2,
+                transform: `rotate(${theta}rad)`,
+                transformOrigin: 'center',
+                border: '1px dashed rgba(255,255,255,0.35)',
+                borderRadius: '50%',
+                pointerEvents: 'none',
+                zIndex: 20,
+              }} />
+
+              {/* Line from rx handle to rotation handle */}
+              <div style={{
+                position: 'absolute',
+                left: rxHx, top: rxHy,
+                width: ROT_HANDLE_OFFSET,
+                height: 1,
+                background: 'rgba(255,255,255,0.25)',
+                transform: `translate(0, -50%) rotate(${theta}rad)`,
+                transformOrigin: '0 50%',
+                pointerEvents: 'none',
+                zIndex: 21,
+              }} />
+
+              {/* rx resize handle (white) */}
+              <div data-no-pan=""
+                style={{ ...handleBase, left: rxHx, top: rxHy, background: 'white', cursor: 'col-resize' }}
+                onPointerDown={e => onEllipseHandlePointerDown(e, 'rx')}
+                onPointerMove={e => onEllipseHandlePointerMove(e, 'rx')}
+                onPointerUp={e => onEllipseHandlePointerUp(e, 'rx')}
+              />
+
+              {/* ry resize handle (white) */}
+              <div data-no-pan=""
+                style={{ ...handleBase, left: ryHx, top: ryHy, background: 'white', cursor: 'row-resize' }}
+                onPointerDown={e => onEllipseHandlePointerDown(e, 'ry')}
+                onPointerMove={e => onEllipseHandlePointerMove(e, 'ry')}
+                onPointerUp={e => onEllipseHandlePointerUp(e, 'ry')}
+              />
+
+              {/* Rotation handle (violet) */}
+              <div data-no-pan=""
+                style={{ ...handleBase, left: rotHx, top: rotHy, background: 'rgb(139,92,246)', border: '1.5px solid rgba(255,255,255,0.6)', cursor: 'grab' }}
+                onPointerDown={e => onEllipseHandlePointerDown(e, 'rot')}
+                onPointerMove={e => onEllipseHandlePointerMove(e, 'rot')}
+                onPointerUp={e => onEllipseHandlePointerUp(e, 'rot')}
+              />
+            </>
+          )
+        })()}
 
         {/* Dot tooltip */}
         {selectedDot && mainRef.current && (() => {
