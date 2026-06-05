@@ -11,7 +11,8 @@ const INTER_W = 160
 const INTER_H = 120
 const MAX_HISTORY = 50
 const LS_KEY = 'hazy-palettes'
-const WARP_DENSITIES = [3, 5, 8, 10]
+const DEFAULT_WARP_R = 150
+const MIN_WARP_R = 20
 const INIT_FILTERS = { grain: 0, blur: 0, contrast: 100, brightness: 100, hue: 0 }
 const DEFAULT_RX = 280
 const DEFAULT_RY = 280
@@ -50,13 +51,6 @@ function loadPalettes() {
 }
 function writePalettes(p) { localStorage.setItem(LS_KEY, JSON.stringify(p)) }
 
-function makeDisplacements(N) {
-  return Array.from({ length: N * N }, () => ({ dx: 0, dy: 0 }))
-}
-
-function getOrigPos(row, col, N, W, H) {
-  return { x: col * W / (N - 1), y: row * H / (N - 1) }
-}
 
 function buildCSSFilter({ blur, contrast, brightness, hue }) {
   const parts = []
@@ -83,7 +77,7 @@ const INIT_DOTS = [
   { id: 'dd', colorId: 'cd', x: 600, y: 450, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
 ]
 
-const INIT_WARP = { N: 5, displacements: makeDisplacements(5), intensity: 100 }
+const INIT_WARP = { warpDots: [], intensity: 100 }
 
 const INIT_DOC = {
   background: { hex: '#050510', transparent: false },
@@ -171,21 +165,12 @@ function renderMeshGradient(interCanvas, offCtx, { background, sharpness = 2, co
   offCtx.restore()
 }
 
-function applyWarp(visCtx, offscreen, { N, displacements, intensity }) {
+function applyWarp(visCtx, offscreen, { warpDots = [], intensity = 100 }) {
   const scale = intensity / 100
   const W = offscreen.width, H = offscreen.height
 
-  const dxArr = new Float32Array(N * N)
-  const dyArr = new Float32Array(N * N)
-  let anyDisplaced = false
-  for (let k = 0; k < N * N; k++) {
-    const d = displacements[k]
-    dxArr[k] = d.dx * scale
-    dyArr[k] = d.dy * scale
-    if (d.dx !== 0 || d.dy !== 0) anyDisplaced = true
-  }
-
-  if (!anyDisplaced || scale === 0) {
+  const active = (warpDots).filter(d => d.dx !== 0 || d.dy !== 0)
+  if (!active.length || scale === 0) {
     visCtx.clearRect(0, 0, W, H)
     visCtx.drawImage(offscreen, 0, 0)
     return
@@ -195,29 +180,28 @@ function applyWarp(visCtx, offscreen, { N, displacements, intensity }) {
   const src = offCtx.getImageData(0, 0, W, H).data
   const destImg = new ImageData(W, H)
   const dest = destImg.data
-  const Nm1 = N - 1
+
+  const dots = active.map(d => ({
+    x: d.x, y: d.y,
+    dx: d.dx * scale, dy: d.dy * scale,
+    r2: Math.max(1, d.r * d.r),
+  }))
+  const n = dots.length
 
   for (let py = 0; py < H; py++) {
-    const vf = py / H * Nm1
-    const cj = vf < Nm1 ? vf | 0 : Nm1 - 1
-    const lv = vf - cj, lv1 = 1 - lv
-    const r0 = cj * N, r1 = r0 + N
-
     for (let px = 0; px < W; px++) {
-      const uf = px / W * Nm1
-      const ci = uf < Nm1 ? uf | 0 : Nm1 - 1
-      const lu = uf - ci, lu1 = 1 - lu
-
-      const i00 = r0+ci, i10 = i00+1, i01 = r1+ci, i11 = i01+1
-      const w00 = lu1*lv1, w10 = lu*lv1, w01 = lu1*lv, w11 = lu*lv
-
-      const dx = dxArr[i00]*w00 + dxArr[i10]*w10 + dxArr[i01]*w01 + dxArr[i11]*w11
-      const dy = dyArr[i00]*w00 + dyArr[i10]*w10 + dyArr[i01]*w01 + dyArr[i11]*w11
-
-      let sx = (px - dx + 0.5) | 0, sy = (py - dy + 0.5) | 0
+      let dxSum = 0, dySum = 0
+      for (let i = 0; i < n; i++) {
+        const d = dots[i]
+        const ex = px - d.x, ey = py - d.y
+        const w = Math.exp(-(ex * ex + ey * ey) / d.r2)
+        dxSum += d.dx * w
+        dySum += d.dy * w
+      }
+      let sx = (px - dxSum + 0.5) | 0
+      let sy = (py - dySum + 0.5) | 0
       if (sx < 0) sx = 0; else if (sx >= W) sx = W - 1
       if (sy < 0) sy = 0; else if (sy >= H) sy = H - 1
-
       const si = (sy * W + sx) << 2, di = (py * W + px) << 2
       dest[di] = src[si]; dest[di+1] = src[si+1]; dest[di+2] = src[si+2]; dest[di+3] = src[si+3]
     }
@@ -402,60 +386,6 @@ function ColorRow({ label, color, isActive, onActivate, onChange, onDelete }) {
   )
 }
 
-// ─── WarpGrid overlay ─────────────────────────────────────────────────────────
-
-function WarpGrid({ N, cW, cH, displacements, onPointerDown, onPointerMove, onPointerUp }) {
-  function dp(row, col) {
-    const orig = getOrigPos(row, col, N, cW, cH)
-    const d = displacements[row * N + col]
-    return { x: orig.x + d.dx, y: orig.y + d.dy }
-  }
-
-  const lines = []
-  for (let row = 0; row < N; row++) {
-    for (let col = 0; col < N - 1; col++) {
-      const a = dp(row, col), b = dp(row, col + 1)
-      lines.push(<line key={`h${row}-${col}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-        stroke="rgba(255,255,255,0.22)" strokeWidth="0.75" />)
-    }
-  }
-  for (let row = 0; row < N - 1; row++) {
-    for (let col = 0; col < N; col++) {
-      const a = dp(row, col), b = dp(row + 1, col)
-      lines.push(<line key={`v${row}-${col}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-        stroke="rgba(255,255,255,0.22)" strokeWidth="0.75" />)
-    }
-  }
-
-  const handles = []
-  for (let k = 0; k < N * N; k++) {
-    const row = (k / N) | 0, col = k % N
-    const p = dp(row, col)
-    const moved = displacements[k].dx !== 0 || displacements[k].dy !== 0
-    handles.push(
-      <circle key={k} cx={p.x} cy={p.y} r={5}
-        fill={moved ? '#a78bfa' : 'rgba(255,255,255,0.5)'}
-        stroke={moved ? 'rgba(109,40,217,0.9)' : 'rgba(0,0,0,0.45)'}
-        strokeWidth="1.5"
-        style={{ cursor: 'move', pointerEvents: 'all' }}
-        onPointerDown={e => onPointerDown(e, k)}
-        onPointerMove={e => onPointerMove(e, k)}
-        onPointerUp={e => onPointerUp(e, k)}
-      />
-    )
-  }
-
-  return (
-    <svg style={{
-      position: 'absolute', left: 0, top: 0,
-      width: cW, height: cH,
-      overflow: 'visible', pointerEvents: 'none',
-    }}>
-      {lines}
-      {handles}
-    </svg>
-  )
-}
 
 // ─── FilterSlider ─────────────────────────────────────────────────────────────
 
@@ -539,7 +469,7 @@ export default function App() {
   const panDrag = useRef(false)
   const panLast = useRef({ x: 0, y: 0 })
   const dotDrag = useRef(null)
-  const gridDrag = useRef(null)
+  const warpDotDrag = useRef(null)
   const ellipseDrag = useRef(null)
   const pinchDist = useRef(null)
   const spaceHeld = useRef(false)
@@ -558,6 +488,7 @@ export default function App() {
     selectedDotIdsRef.current = next
     _setSelectedDotIds(next)
   }
+  const [selectedWarpDotId, setSelectedWarpDotId] = useState(null)
   const [paletteName, setPaletteName] = useState('')
   const [savedPalettes, setSavedPalettes] = useState(loadPalettes)
   const [wDraft, setWDraft] = useState(String(CANVAS_W))
@@ -649,7 +580,7 @@ export default function App() {
     if (spaceHeld.current) {
       panDrag.current = true
       panLast.current = { x: e.clientX, y: e.clientY }
-    } else {
+    } else if (!smearActive) {
       const bs = { startX: e.clientX, startY: e.clientY, curX: e.clientX, curY: e.clientY, shiftKey: e.shiftKey }
       boxSelectRef.current = bs
       setBoxSelect({ ...bs })
@@ -672,17 +603,19 @@ export default function App() {
       panDrag.current = false
       return
     }
+    if (smearActive) {
+      setSelectedWarpDotId(null)
+      return
+    }
     const bs = boxSelectRef.current
     if (!bs) return
     boxSelectRef.current = null
     setBoxSelect(null)
     const moved = Math.hypot(bs.curX - bs.startX, bs.curY - bs.startY) > 6
     if (!moved) {
-      // Plain click on empty canvas → deselect all
       setSelectedDotIds(new Set())
       return
     }
-    // Box select: collect dots whose center falls inside the rectangle
     const p1 = viewportToCanvas(Math.min(bs.startX, bs.curX), Math.min(bs.startY, bs.curY))
     const p2 = viewportToCanvas(Math.max(bs.startX, bs.curX), Math.max(bs.startY, bs.curY))
     const inside = new Set(presentRef.current.dots
@@ -693,9 +626,9 @@ export default function App() {
 
   function onMainDoubleClick(e) {
     if (e.target.closest('button, input, select, [data-no-pan]')) return
-    if (smearActive) return
     const pos = viewportToCanvas(e.clientX, e.clientY)
-    placeDot(pos.x, pos.y)
+    if (smearActive) placeWarpDot(pos.x, pos.y)
+    else placeDot(pos.x, pos.y)
   }
 
   // ── Pinch ─────────────────────────────────────────────────────────────────────
@@ -829,29 +762,99 @@ export default function App() {
     ellipseDrag.current = null
   }
 
-  // ── Warp handle drag ──────────────────────────────────────────────────────────
+  // ── Warp dot drag ─────────────────────────────────────────────────────────────
 
-  function onGridPointerDown(e, k) {
+  function onWarpDotBodyPointerDown(e, id) {
     e.stopPropagation()
     e.currentTarget.setPointerCapture(e.pointerId)
-    const d = presentRef.current.warp.displacements[k]
-    gridDrag.current = { k, startDx: d.dx, startDy: d.dy, clientX: e.clientX, clientY: e.clientY, snapshot: presentRef.current }
+    setSelectedWarpDotId(id)
+    const dot = presentRef.current.warp.warpDots.find(d => d.id === id)
+    if (!dot) return
+    warpDotDrag.current = { type: 'body', id, startX: dot.x, startY: dot.y, clientX: e.clientX, clientY: e.clientY, snapshot: presentRef.current }
   }
-  function onGridPointerMove(e, k) {
-    const gd = gridDrag.current
-    if (!gd || gd.k !== k) return
-    const ddx = (e.clientX - gd.clientX) / viewRef.current.zoom
-    const ddy = (e.clientY - gd.clientY) / viewRef.current.zoom
-    const newDisp = [...presentRef.current.warp.displacements]
-    newDisp[k] = { dx: gd.startDx + ddx, dy: gd.startDy + ddy }
-    liveUpdate({ ...presentRef.current, warp: { ...presentRef.current.warp, displacements: newDisp } })
+  function onWarpDotBodyPointerMove(e, id) {
+    const wd = warpDotDrag.current
+    if (!wd || wd.type !== 'body' || wd.id !== id) return
+    const dx = (e.clientX - wd.clientX) / viewRef.current.zoom
+    const dy = (e.clientY - wd.clientY) / viewRef.current.zoom
+    liveUpdate({
+      ...presentRef.current,
+      warp: {
+        ...presentRef.current.warp,
+        warpDots: presentRef.current.warp.warpDots.map(d =>
+          d.id === id ? { ...d, x: wd.startX + dx, y: wd.startY + dy } : d
+        ),
+      },
+    })
   }
-  function onGridPointerUp(e, k) {
-    const gd = gridDrag.current
-    if (!gd || gd.k !== k) return
-    setPast(p => [...p.slice(-(MAX_HISTORY - 1)), gd.snapshot])
+  function onWarpDotBodyPointerUp(e, id) {
+    e.stopPropagation()
+    const wd = warpDotDrag.current
+    if (!wd || wd.id !== id) return
+    setPast(p => [...p.slice(-(MAX_HISTORY - 1)), wd.snapshot])
     setFuture([])
-    gridDrag.current = null
+    warpDotDrag.current = null
+  }
+
+  function onWarpArrowPointerDown(e, id) {
+    e.stopPropagation()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    setSelectedWarpDotId(id)
+    warpDotDrag.current = { type: 'arrow', id, snapshot: presentRef.current }
+  }
+  function onWarpArrowPointerMove(e, id) {
+    const wd = warpDotDrag.current
+    if (!wd || wd.type !== 'arrow' || wd.id !== id) return
+    const dot = presentRef.current.warp.warpDots.find(d => d.id === id)
+    if (!dot) return
+    const cp = viewportToCanvas(e.clientX, e.clientY)
+    liveUpdate({
+      ...presentRef.current,
+      warp: {
+        ...presentRef.current.warp,
+        warpDots: presentRef.current.warp.warpDots.map(d =>
+          d.id === id ? { ...d, dx: cp.x - dot.x, dy: cp.y - dot.y } : d
+        ),
+      },
+    })
+  }
+  function onWarpArrowPointerUp(e, id) {
+    e.stopPropagation()
+    const wd = warpDotDrag.current
+    if (!wd || wd.id !== id) return
+    setPast(p => [...p.slice(-(MAX_HISTORY - 1)), wd.snapshot])
+    setFuture([])
+    warpDotDrag.current = null
+  }
+
+  function onWarpRadiusPointerDown(e, id) {
+    e.stopPropagation()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    setSelectedWarpDotId(id)
+    warpDotDrag.current = { type: 'radius', id, snapshot: presentRef.current }
+  }
+  function onWarpRadiusPointerMove(e, id) {
+    const wd = warpDotDrag.current
+    if (!wd || wd.type !== 'radius' || wd.id !== id) return
+    const dot = presentRef.current.warp.warpDots.find(d => d.id === id)
+    if (!dot) return
+    const cp = viewportToCanvas(e.clientX, e.clientY)
+    const r = Math.max(MIN_WARP_R, Math.hypot(cp.x - dot.x, cp.y - dot.y))
+    liveUpdate({
+      ...presentRef.current,
+      warp: {
+        ...presentRef.current.warp,
+        warpDots: presentRef.current.warp.warpDots.map(d => d.id === id ? { ...d, r } : d),
+      },
+    })
+  }
+  function onWarpRadiusPointerUp(e, id) {
+    e.stopPropagation()
+    const wd = warpDotDrag.current
+    if (!wd || wd.id !== id) return
+    setPast(p => [...p.slice(-(MAX_HISTORY - 1)), wd.snapshot])
+    setFuture([])
+    warpDotDrag.current = null
   }
 
   // ── Color operations ──────────────────────────────────────────────────────────
@@ -893,6 +896,18 @@ export default function App() {
     setSelectedDotIds(new Set([dot.id]))
   }
 
+  function placeWarpDot(x, y) {
+    const dot = { id: uid(), x, y, dx: 0, dy: 0, r: DEFAULT_WARP_R }
+    commit({ ...present, warp: { ...present.warp, warpDots: [...(present.warp.warpDots ?? []), dot] } })
+    setSelectedWarpDotId(dot.id)
+  }
+
+  function deleteSelectedWarpDot() {
+    if (!selectedWarpDotId) return
+    commit({ ...present, warp: { ...present.warp, warpDots: present.warp.warpDots.filter(d => d.id !== selectedWarpDotId) } })
+    setSelectedWarpDotId(null)
+  }
+
   function reassignDot(dotId, colorId) {
     commit({ ...present, dots: present.dots.map(d => d.id === dotId ? { ...d, colorId } : d) })
   }
@@ -932,6 +947,15 @@ export default function App() {
         rx: (d.rx ?? DEFAULT_RX) * sX,
         ry: (d.ry ?? DEFAULT_RY) * sY,
       })),
+      warp: {
+        ...present.warp,
+        warpDots: (present.warp.warpDots ?? []).map(d => ({
+          ...d,
+          x: d.x * sX, y: d.y * sY,
+          dx: d.dx * sX, dy: d.dy * sY,
+          r: d.r * Math.sqrt(sX * sY),
+        })),
+      },
     })
   }
 
@@ -946,29 +970,12 @@ export default function App() {
 
   // ── Warp operations ───────────────────────────────────────────────────────────
 
-  function setGridDensity(n) {
-    commit({ ...present, warp: { ...present.warp, N: n, displacements: makeDisplacements(n) } })
-  }
   function updateWarpIntensity(v) {
     commit({ ...present, warp: { ...present.warp, intensity: v } })
   }
-  function resetWarp() {
-    commit({ ...present, warp: { ...present.warp, displacements: makeDisplacements(present.warp.N) } })
-  }
-  function randomizeWarp() {
-    const { N } = present.warp
-    const rand = seededRand(Date.now())
-    const maxDisp = Math.min(cW, cH) / (N - 1) * 0.45
-    commit({
-      ...present,
-      warp: {
-        ...present.warp,
-        displacements: Array.from({ length: N * N }, () => ({
-          dx: (rand() - 0.5) * 2 * maxDisp,
-          dy: (rand() - 0.5) * 2 * maxDisp,
-        })),
-      },
-    })
+  function clearWarpDots() {
+    commit({ ...present, warp: { ...present.warp, warpDots: [] } })
+    setSelectedWarpDotId(null)
   }
 
   // ── Filter operations ─────────────────────────────────────────────────────────
@@ -1021,9 +1028,14 @@ export default function App() {
         return
       }
       if (e.target.tagName === 'INPUT') return
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDotIds.size > 0) {
-        e.preventDefault()
-        deleteSelectedDots()
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (smearActive && selectedWarpDotId) {
+          e.preventDefault()
+          deleteSelectedWarpDot()
+        } else if (!smearActive && selectedDotIds.size > 0) {
+          e.preventDefault()
+          deleteSelectedDots()
+        }
       }
       if ((e.key === 'z' || e.key === 'Z') && (e.metaKey || e.ctrlKey)) {
         e.preventDefault()
@@ -1032,7 +1044,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selectedDotIds, past, future])
+  }, [selectedDotIds, selectedWarpDotId, smearActive, past, future])
 
   // ── Derived ───────────────────────────────────────────────────────────────────
 
@@ -1179,40 +1191,22 @@ export default function App() {
 
           {/* ── Warp ── */}
           <Section title="Warp">
-            <div className="mb-3">
-              <div className="text-[10px] text-white/30 mb-1.5 uppercase tracking-wide">Grid density</div>
-              <div className="flex gap-1">
-                {WARP_DENSITIES.map(n => (
-                  <button key={n} onClick={() => setGridDensity(n)}
-                    className={`flex-1 py-1 rounded text-[11px] font-medium transition-colors border ${
-                      present.warp.N === n
-                        ? 'bg-violet-500/20 border-violet-500/40 text-violet-300'
-                        : 'bg-white/[0.04] border-white/[0.08] text-white/35 hover:text-white/65 hover:bg-white/[0.08]'
-                    }`}>
-                    {n}×{n}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <p className="text-[10px] text-white/25 leading-relaxed mb-3">
+              Switch to Warp mode and double-click to place dots. Drag the yellow handle to set direction and strength.
+            </p>
             <div className="mb-3">
               <div className="flex justify-between items-center mb-1.5">
                 <span className="text-[10px] text-white/30 uppercase tracking-wide">Intensity</span>
                 <span className="text-[10px] text-white/40 tabular-nums">{present.warp.intensity}%</span>
               </div>
-              <input type="range" min={0} max={100} value={present.warp.intensity}
+              <input type="range" min={0} max={200} value={present.warp.intensity}
                 onChange={e => updateWarpIntensity(+e.target.value)}
                 className="w-full accent-violet-400" style={{ cursor: 'pointer' }} />
             </div>
-            <div className="flex gap-1.5">
-              <button onClick={resetWarp}
-                className="flex-1 py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
-                Reset warp
-              </button>
-              <button onClick={randomizeWarp}
-                className="flex-1 py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
-                Randomize
-              </button>
-            </div>
+            <button onClick={clearWarpDots}
+              className="w-full py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
+              Clear all{(present.warp.warpDots ?? []).length > 0 ? ` (${present.warp.warpDots.length})` : ''}
+            </button>
           </Section>
 
           {/* ── Filters ── */}
@@ -1270,7 +1264,7 @@ export default function App() {
       <main
         ref={mainRef}
         className="flex-1 relative overflow-hidden"
-        style={{ cursor: spaceDown ? 'grab' : activeColorId && !smearActive ? 'crosshair' : 'default' }}
+        style={{ cursor: spaceDown ? 'grab' : smearActive || activeColorId ? 'crosshair' : 'default' }}
         onPointerDown={onMainPointerDown}
         onPointerMove={onMainPointerMove}
         onPointerUp={onMainPointerUp}
@@ -1290,7 +1284,11 @@ export default function App() {
           }}>
             {[['Compose', false], ['Warp', true]].map(([label, isWarp]) => (
               <button key={label} data-no-pan=""
-                onClick={() => setSmearActive(isWarp)}
+                onClick={() => {
+                  setSmearActive(isWarp)
+                  if (isWarp) setSelectedDotIds(new Set())
+                  else setSelectedWarpDotId(null)
+                }}
                 style={{
                   padding: '4px 14px',
                   borderRadius: 7,
@@ -1380,16 +1378,58 @@ export default function App() {
               )
             })}
 
-            {/* Warp grid */}
+            {/* Warp dots overlay */}
             {smearActive && (
-              <WarpGrid
-                N={present.warp.N}
-                cW={cW} cH={cH}
-                displacements={present.warp.displacements}
-                onPointerDown={onGridPointerDown}
-                onPointerMove={onGridPointerMove}
-                onPointerUp={onGridPointerUp}
-              />
+              <svg style={{
+                position: 'absolute', left: 0, top: 0,
+                width: cW, height: cH,
+                overflow: 'visible', pointerEvents: 'none',
+              }}>
+                {(present.warp.warpDots ?? []).map(wd => {
+                  const sel = selectedWarpDotId === wd.id
+                  const ax = wd.x + wd.dx, ay = wd.y + wd.dy
+                  const hasDelta = wd.dx !== 0 || wd.dy !== 0
+                  return (
+                    <g key={wd.id}>
+                      <circle cx={wd.x} cy={wd.y} r={wd.r}
+                        fill={sel ? 'rgba(139,92,246,0.06)' : 'rgba(255,255,255,0.02)'}
+                        stroke={sel ? 'rgba(139,92,246,0.4)' : 'rgba(255,255,255,0.12)'}
+                        strokeWidth={1} strokeDasharray="4 3" pointerEvents="none"
+                      />
+                      {hasDelta && (
+                        <line x1={wd.x} y1={wd.y} x2={ax} y2={ay}
+                          stroke="rgba(255,255,255,0.55)" strokeWidth={1.5} pointerEvents="none"
+                        />
+                      )}
+                      <circle cx={wd.x} cy={wd.y} r={6}
+                        fill={sel ? 'rgb(139,92,246)' : 'rgba(255,255,255,0.8)'}
+                        stroke={sel ? 'rgba(109,40,217,0.9)' : 'rgba(0,0,0,0.4)'}
+                        strokeWidth={1.5}
+                        style={{ cursor: 'move', pointerEvents: 'all' }}
+                        onPointerDown={e => onWarpDotBodyPointerDown(e, wd.id)}
+                        onPointerMove={e => onWarpDotBodyPointerMove(e, wd.id)}
+                        onPointerUp={e => onWarpDotBodyPointerUp(e, wd.id)}
+                      />
+                      <circle cx={ax} cy={ay} r={5}
+                        fill="rgba(251,191,36,0.9)" stroke="rgba(0,0,0,0.4)" strokeWidth={1.5}
+                        style={{ cursor: 'grab', pointerEvents: 'all' }}
+                        onPointerDown={e => onWarpArrowPointerDown(e, wd.id)}
+                        onPointerMove={e => onWarpArrowPointerMove(e, wd.id)}
+                        onPointerUp={e => onWarpArrowPointerUp(e, wd.id)}
+                      />
+                      {sel && (
+                        <circle cx={wd.x + wd.r} cy={wd.y} r={5}
+                          fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
+                          style={{ cursor: 'ew-resize', pointerEvents: 'all' }}
+                          onPointerDown={e => onWarpRadiusPointerDown(e, wd.id)}
+                          onPointerMove={e => onWarpRadiusPointerMove(e, wd.id)}
+                          onPointerUp={e => onWarpRadiusPointerUp(e, wd.id)}
+                        />
+                      )}
+                    </g>
+                  )
+                })}
+              </svg>
             )}
           </div>
         </div>
@@ -1477,7 +1517,7 @@ export default function App() {
         })()}
 
         {/* Dot tooltip — single selection */}
-        {selectedDotIds.size === 1 && selectedDot && mainRef.current && (() => {
+        {selectedDotIds.size === 1 && selectedDot && !smearActive && mainRef.current && (() => {
           const { width, height } = mainRef.current.getBoundingClientRect()
           const tx = width / 2 + view.pan.x + (selectedDot.x - cW / 2) * view.zoom
           const ty = height / 2 + view.pan.y + (selectedDot.y - cH / 2) * view.zoom
@@ -1548,7 +1588,7 @@ export default function App() {
         })()}
 
         {/* Multi-select tooltip */}
-        {selectedDotIds.size > 1 && mainRef.current && (() => {
+        {selectedDotIds.size > 1 && !smearActive && mainRef.current && (() => {
           const selDots = present.dots.filter(d => selectedDotIds.has(d.id))
           const cx = selDots.reduce((s, d) => s + d.x, 0) / selDots.length
           const cy = selDots.reduce((s, d) => s + d.y, 0) / selDots.length
