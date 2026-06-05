@@ -12,8 +12,9 @@ const INTER_H = 120
 const MAX_HISTORY = 50
 const LS_KEY = 'hazy-palettes'
 const WARP_DENSITIES = [3, 5, 8, 10]
-const MESH_DENSITIES = [[2, 2], [3, 3], [4, 4], [5, 5]]
 const INIT_FILTERS = { grain: 0, blur: 0, contrast: 100, brightness: 100, hue: 0 }
+const COLOR_DEFAULTS = ['#ff6b6b', '#4fc3f7', '#a29bfe', '#fdcb6e', '#55efc4', '#fd79a8', '#e17055', '#74b9ff']
+const LABELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -29,15 +30,15 @@ function hexToRgb(hex) {
   }
 }
 
+function seededRand(seed) {
+  let s = seed >>> 0
+  return () => { s = (Math.imul(1664525, s) + 1013904223) >>> 0; return s / 0x100000000 }
+}
+
 function rgbToHex({ r, g, b }) {
   return '#' + [r, g, b].map(v =>
     Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')
   ).join('')
-}
-
-function seededRand(seed) {
-  let s = seed >>> 0
-  return () => { s = (Math.imul(1664525, s) + 1013904223) >>> 0; return s / 0x100000000 }
 }
 
 function loadPalettes() {
@@ -62,81 +63,56 @@ function buildCSSFilter({ blur, contrast, brightness, hue }) {
   return parts.join(' ') || 'none'
 }
 
-// Bilinearly interpolate default corner colors across the grid
-function defaultMeshColors(rows, cols) {
-  const tl = hexToRgb('#ff6b6b'), tr = hexToRgb('#4fc3f7')
-  const bl = hexToRgb('#a29bfe'), br = hexToRgb('#fdcb6e')
-  const result = []
-  for (let r = 0; r <= rows; r++) {
-    for (let c = 0; c <= cols; c++) {
-      const u = cols > 0 ? c / cols : 0
-      const v = rows > 0 ? r / rows : 0
-      result.push(rgbToHex({
-        r: tl.r*(1-u)*(1-v) + tr.r*u*(1-v) + bl.r*(1-u)*v + br.r*u*v,
-        g: tl.g*(1-u)*(1-v) + tr.g*u*(1-v) + bl.g*(1-u)*v + br.g*u*v,
-        b: tl.b*(1-u)*(1-v) + tr.b*u*(1-v) + bl.b*(1-u)*v + br.b*u*v,
-      }))
-    }
-  }
-  return result
-}
-
-function makeMeshPoints(rows, cols, colors) {
-  const defs = colors || defaultMeshColors(rows, cols)
-  const pts = []
-  for (let r = 0; r <= rows; r++) {
-    for (let c = 0; c <= cols; c++) {
-      pts.push({ id: `r${r}c${c}`, color: defs[r * (cols + 1) + c] || '#888888', opacity: 100 })
-    }
-  }
-  return pts
-}
-
-function makeMeshPositions(rows, cols) {
-  const pos = {}
-  for (let r = 0; r <= rows; r++) {
-    for (let c = 0; c <= cols; c++) {
-      pos[`r${r}c${c}`] = { x: (c / cols) * CANVAS_W, y: (r / rows) * CANVAS_H }
-    }
-  }
-  return pos
-}
-
 // ─── Initial document ─────────────────────────────────────────────────────────
 
-const INIT_ROWS = 3, INIT_COLS = 3
+const INIT_COLORS = [
+  { id: 'ca', hex: '#ff6b6b' },
+  { id: 'cb', hex: '#4fc3f7' },
+  { id: 'cc', hex: '#a29bfe' },
+  { id: 'cd', hex: '#fdcb6e' },
+]
 
-const INIT_MESH = {
-  rows: INIT_ROWS, cols: INIT_COLS,
-  points: makeMeshPoints(INIT_ROWS, INIT_COLS),
-  positions: makeMeshPositions(INIT_ROWS, INIT_COLS),
-}
+const INIT_DOTS = [
+  { id: 'da', colorId: 'ca', x: 200, y: 150 },
+  { id: 'db', colorId: 'cb', x: 600, y: 150 },
+  { id: 'dc', colorId: 'cc', x: 200, y: 450 },
+  { id: 'dd', colorId: 'cd', x: 600, y: 450 },
+]
 
 const INIT_WARP = { N: 5, displacements: makeDisplacements(5), intensity: 100 }
 
 const INIT_DOC = {
   background: { hex: '#050510', transparent: false },
-  mesh: INIT_MESH,
+  colors: INIT_COLORS,
+  dots: INIT_DOTS,
   warp: INIT_WARP,
   filters: INIT_FILTERS,
 }
 
 // ─── Render pipeline ──────────────────────────────────────────────────────────
 
-// IDW (Inverse Distance Weighting) mesh gradient.
-// Renders at INTER_W×INTER_H then scales up to the offscreen canvas via drawImage.
-function renderMeshGradient(interCanvas, offCtx, { background, mesh }) {
-  const { points, positions } = mesh
+function renderMeshGradient(interCanvas, offCtx, { background, colors, dots }) {
   const W = CANVAS_W, H = CANVAS_H
   const IW = INTER_W, IH = INTER_H
   const scaleX = W / IW, scaleY = H / IH
 
-  // Map control points to inter-canvas coordinate space
-  const cpts = points.map(pt => {
-    const pos = positions[pt.id] || { x: W / 2, y: H / 2 }
-    const { r, g, b } = hexToRgb(pt.color)
-    return { x: pos.x / scaleX, y: pos.y / scaleY, r, g, b, a: pt.opacity / 100 }
-  })
+  const colorMap = {}
+  colors.forEach(c => { colorMap[c.id] = c })
+
+  const cpts = dots.map(dot => {
+    const color = colorMap[dot.colorId]
+    if (!color) return null
+    const { r, g, b } = hexToRgb(color.hex)
+    return { x: dot.x / scaleX, y: dot.y / scaleY, r, g, b }
+  }).filter(Boolean)
+
+  offCtx.clearRect(0, 0, W, H)
+  if (!background.transparent) {
+    offCtx.fillStyle = background.hex
+    offCtx.fillRect(0, 0, W, H)
+  }
+
+  if (cpts.length === 0) return
 
   const interCtx = interCanvas.getContext('2d')
   const imgData = new ImageData(IW, IH)
@@ -152,7 +128,7 @@ function renderMeshGradient(interCanvas, offCtx, { background, mesh }) {
         const dx = px - pt.x, dy = py - pt.y
         const d2 = dx * dx + dy * dy
         if (d2 < 1) { rSum = pt.r; gSum = pt.g; bSum = pt.b; wSum = 1; break }
-        const w = pt.a / d2
+        const w = 1 / d2
         rSum += pt.r * w; gSum += pt.g * w; bSum += pt.b * w; wSum += w
       }
 
@@ -165,12 +141,6 @@ function renderMeshGradient(interCanvas, offCtx, { background, mesh }) {
   }
 
   interCtx.putImageData(imgData, 0, 0)
-
-  offCtx.clearRect(0, 0, W, H)
-  if (!background.transparent) {
-    offCtx.fillStyle = background.hex
-    offCtx.fillRect(0, 0, W, H)
-  }
   offCtx.save()
   offCtx.imageSmoothingEnabled = true
   offCtx.imageSmoothingQuality = 'high'
@@ -178,8 +148,6 @@ function renderMeshGradient(interCanvas, offCtx, { background, mesh }) {
   offCtx.restore()
 }
 
-// Inverse-map bilinear warp: for each output pixel, interpolate the displacement
-// at its grid cell and sample the source at (px - dx, py - dy).
 function applyWarp(visCtx, offscreen, { N, displacements, intensity }) {
   const scale = intensity / 100
   const W = CANVAS_W, H = CANVAS_H
@@ -209,37 +177,26 @@ function applyWarp(visCtx, offscreen, { N, displacements, intensity }) {
   for (let py = 0; py < H; py++) {
     const vf = py / H * Nm1
     const cj = vf < Nm1 ? vf | 0 : Nm1 - 1
-    const lv = vf - cj
-    const lv1 = 1 - lv
-    const r0 = cj * N
-    const r1 = r0 + N
+    const lv = vf - cj, lv1 = 1 - lv
+    const r0 = cj * N, r1 = r0 + N
 
     for (let px = 0; px < W; px++) {
       const uf = px / W * Nm1
       const ci = uf < Nm1 ? uf | 0 : Nm1 - 1
-      const lu = uf - ci
-      const lu1 = 1 - lu
+      const lu = uf - ci, lu1 = 1 - lu
 
-      const i00 = r0 + ci, i10 = i00 + 1
-      const i01 = r1 + ci, i11 = i01 + 1
-
-      const w00 = lu1 * lv1, w10 = lu * lv1
-      const w01 = lu1 * lv,  w11 = lu * lv
+      const i00 = r0+ci, i10 = i00+1, i01 = r1+ci, i11 = i01+1
+      const w00 = lu1*lv1, w10 = lu*lv1, w01 = lu1*lv, w11 = lu*lv
 
       const dx = dxArr[i00]*w00 + dxArr[i10]*w10 + dxArr[i01]*w01 + dxArr[i11]*w11
       const dy = dyArr[i00]*w00 + dyArr[i10]*w10 + dyArr[i01]*w01 + dyArr[i11]*w11
 
-      let sx = (px - dx + 0.5) | 0
-      let sy = (py - dy + 0.5) | 0
+      let sx = (px - dx + 0.5) | 0, sy = (py - dy + 0.5) | 0
       if (sx < 0) sx = 0; else if (sx >= W) sx = W - 1
       if (sy < 0) sy = 0; else if (sy >= H) sy = H - 1
 
-      const si = (sy * W + sx) << 2
-      const di = (py * W + px) << 2
-      dest[di]   = src[si]
-      dest[di+1] = src[si+1]
-      dest[di+2] = src[si+2]
-      dest[di+3] = src[si+3]
+      const si = (sy * W + sx) << 2, di = (py * W + px) << 2
+      dest[di] = src[si]; dest[di+1] = src[si+1]; dest[di+2] = src[si+2]; dest[di+3] = src[si+3]
     }
   }
 
@@ -274,6 +231,23 @@ function IconRedo() {
     </svg>
   )
 }
+function IconTrash() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14H6L5 6" />
+      <path d="M10 11v6M14 11v6" /><path d="M9 6V4h6v2" />
+    </svg>
+  )
+}
+function IconPlus() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  )
+}
 function IconShuffle() {
   return (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -290,15 +264,6 @@ function IconGrid() {
       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
       <rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" />
-    </svg>
-  )
-}
-function IconReset() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-      <path d="M3 3v5h5" />
     </svg>
   )
 }
@@ -348,47 +313,68 @@ function Toggle({ on, onChange, label }) {
   )
 }
 
-// ─── MiniColorPicker ──────────────────────────────────────────────────────────
+// ─── ColorRow ─────────────────────────────────────────────────────────────────
 
-function MiniColorPicker({ hex, opacity, onChangeHex, onChangeOpacity, showOpacity = true }) {
+function ColorRow({ label, color, isActive, onActivate, onChange, onDelete }) {
   const pickerRef = useRef(null)
-  const [draft, setDraft] = useState(hex)
-  useEffect(() => setDraft(hex), [hex])
+  const [hexDraft, setHexDraft] = useState(color.hex)
+  useEffect(() => setHexDraft(color.hex), [color.hex])
 
   function commitHex(val) {
     const c = /^#/.test(val) ? val : '#' + val
-    if (/^#[0-9a-fA-F]{6}$/.test(c)) onChangeHex(c.toLowerCase())
-    else setDraft(hex)
+    if (/^#[0-9a-fA-F]{6}$/.test(c)) onChange({ ...color, hex: c.toLowerCase() })
+    else setHexDraft(color.hex)
   }
 
   return (
-    <div>
-      <div className="flex items-center gap-1.5 mb-2">
-        <div onClick={() => pickerRef.current?.click()} style={{
-          width: 22, height: 22, borderRadius: 5, flexShrink: 0,
-          background: hex, border: '1.5px solid rgba(255,255,255,0.12)', cursor: 'pointer',
-        }} />
-        <input ref={pickerRef} type="color" value={hex}
-          onChange={e => onChangeHex(e.target.value)}
-          style={{ position: 'absolute', opacity: 0, width: 0, height: 0, pointerEvents: 'none' }} />
-        <input
-          value={draft}
-          onChange={e => setDraft(e.target.value)}
-          onBlur={e => commitHex(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && commitHex(draft)}
-          maxLength={7}
-          className="font-mono text-[11px] text-white/60 bg-white/[0.05] border border-white/[0.08] rounded px-1.5 py-0.5 outline-none focus:border-white/20 w-[68px] shrink-0"
-          spellCheck={false}
-        />
-      </div>
-      {showOpacity && (
-        <div className="flex items-center gap-1.5">
-          <input type="range" min={0} max={100} value={opacity}
-            onChange={e => onChangeOpacity(+e.target.value)}
-            className="flex-1 accent-violet-400 h-px" style={{ cursor: 'pointer' }} />
-          <span className="text-[10px] text-white/25 w-6 text-right shrink-0 tabular-nums">{opacity}</span>
-        </div>
-      )}
+    <div
+      className={`flex items-center gap-1.5 mb-1 px-1.5 py-1 rounded-md cursor-pointer transition-colors ${
+        isActive ? 'bg-white/[0.08]' : 'hover:bg-white/[0.04]'
+      }`}
+      onClick={onActivate}
+    >
+      {/* Active dot */}
+      <div style={{
+        width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+        background: isActive ? 'white' : 'transparent',
+        border: `1.5px solid rgba(255,255,255,${isActive ? 0.9 : 0.2})`,
+        transition: 'background 0.12s',
+      }} />
+
+      {/* Label */}
+      <span className="text-[11px] font-semibold text-white/40 w-4 text-center shrink-0">{label}</span>
+
+      {/* Swatch */}
+      <div
+        onClick={e => { e.stopPropagation(); pickerRef.current?.click() }}
+        style={{
+          width: 20, height: 20, borderRadius: 4, flexShrink: 0,
+          background: color.hex, border: '1.5px solid rgba(255,255,255,0.12)', cursor: 'pointer',
+        }}
+      />
+      <input ref={pickerRef} type="color" value={color.hex}
+        onChange={e => onChange({ ...color, hex: e.target.value })}
+        style={{ position: 'absolute', opacity: 0, width: 0, height: 0, pointerEvents: 'none' }} />
+
+      {/* Hex input */}
+      <input
+        value={hexDraft}
+        onChange={e => setHexDraft(e.target.value)}
+        onBlur={e => commitHex(e.target.value)}
+        onKeyDown={e => e.key === 'Enter' && commitHex(hexDraft)}
+        onClick={e => e.stopPropagation()}
+        maxLength={7}
+        className="font-mono text-[11px] text-white/60 bg-white/[0.05] border border-white/[0.08] rounded px-1.5 py-0.5 outline-none focus:border-white/20 flex-1 min-w-0"
+        spellCheck={false}
+      />
+
+      {/* Delete */}
+      <button
+        onClick={e => { e.stopPropagation(); onDelete() }}
+        className="text-white/20 hover:text-red-400 transition-colors shrink-0"
+      >
+        <IconTrash />
+      </button>
     </div>
   )
 }
@@ -477,13 +463,11 @@ export default function App() {
   const presentRef = useRef(INIT_DOC)
 
   function syncPresent(doc) { presentRef.current = doc; _setPresent(doc) }
-
   function commit(doc) {
     setPast(p => [...p.slice(-(MAX_HISTORY - 1)), presentRef.current])
     setFuture([])
     syncPresent(doc)
   }
-
   function liveUpdate(doc) { syncPresent(doc) }
 
   function undo() {
@@ -493,7 +477,6 @@ export default function App() {
     setPast(p => p.slice(0, -1))
     syncPresent(prev)
   }
-
   function redo() {
     if (!future.length) return
     const next = future[0]
@@ -513,7 +496,6 @@ export default function App() {
   const canvasRef = useRef(null)
   const mainRef = useRef(null)
 
-  // Offscreen canvas: receives the mesh gradient, fed into warp
   const offscreenRef = useRef(null)
   if (!offscreenRef.current) {
     const c = document.createElement('canvas')
@@ -521,7 +503,6 @@ export default function App() {
     offscreenRef.current = c
   }
 
-  // Intermediate canvas: IDW rendered at low res, then scaled up to offscreen
   const interRef = useRef(null)
   if (!interRef.current) {
     const c = document.createElement('canvas')
@@ -531,16 +512,19 @@ export default function App() {
 
   const panDrag = useRef(false)
   const panLast = useRef({ x: 0, y: 0 })
-  const meshDrag = useRef(null)
+  const panStart = useRef({ x: 0, y: 0 })
+  const panMoved = useRef(false)
+  const dotDrag = useRef(null)
   const gridDrag = useRef(null)
   const pinchDist = useRef(null)
 
   // ── UI state ─────────────────────────────────────────────────────────────────
 
+  const [smearActive, setSmearActive] = useState(false)
+  const [activeColorId, setActiveColorId] = useState(INIT_COLORS[0].id)
+  const [selectedDotId, setSelectedDotId] = useState(null)
   const [paletteName, setPaletteName] = useState('')
   const [savedPalettes, setSavedPalettes] = useState(loadPalettes)
-  const [smearActive, setSmearActive] = useState(false)
-  const [selectedPointId, setSelectedPointId] = useState(null)
 
   // ── Canvas render ─────────────────────────────────────────────────────────────
 
@@ -549,10 +533,8 @@ export default function App() {
     const offscreen = offscreenRef.current
     const inter = interRef.current
     if (!canvas || !offscreen || !inter) return
-
     const offCtx = offscreen.getContext('2d')
     renderMeshGradient(inter, offCtx, present)
-
     const ctx = canvas.getContext('2d')
     applyWarp(ctx, offscreen, present.warp)
   }, [present])
@@ -577,23 +559,45 @@ export default function App() {
     return () => el.removeEventListener('wheel', onWheel)
   }, [])
 
-  // ── Canvas pan ────────────────────────────────────────────────────────────────
+  // ── Canvas coordinate conversion ──────────────────────────────────────────────
+
+  function viewportToCanvas(clientX, clientY) {
+    const rect = mainRef.current.getBoundingClientRect()
+    const { zoom, pan } = viewRef.current
+    const ox = clientX - (rect.left + rect.width / 2) - pan.x
+    const oy = clientY - (rect.top + rect.height / 2) - pan.y
+    return { x: ox / zoom + CANVAS_W / 2, y: oy / zoom + CANVAS_H / 2 }
+  }
+
+  // ── Canvas pan + click-to-place ────────────────────────────────────────────────
 
   function onMainPointerDown(e) {
     if (e.target.closest('button, input, select, [data-no-pan]')) return
     panDrag.current = true
+    panMoved.current = false
     panLast.current = { x: e.clientX, y: e.clientY }
+    panStart.current = { x: e.clientX, y: e.clientY }
     e.currentTarget.setPointerCapture(e.pointerId)
   }
   function onMainPointerMove(e) {
     if (!panDrag.current) return
-    const dx = e.clientX - panLast.current.x
-    const dy = e.clientY - panLast.current.y
+    const dx = e.clientX - panStart.current.x
+    const dy = e.clientY - panStart.current.y
+    if (Math.hypot(dx, dy) > 4) panMoved.current = true
+    const mdx = e.clientX - panLast.current.x
+    const mdy = e.clientY - panLast.current.y
     panLast.current = { x: e.clientX, y: e.clientY }
     const v = viewRef.current
-    setView({ ...v, pan: { x: v.pan.x + dx, y: v.pan.y + dy } })
+    setView({ ...v, pan: { x: v.pan.x + mdx, y: v.pan.y + mdy } })
   }
-  function onMainPointerUp() { panDrag.current = false }
+  function onMainPointerUp(e) {
+    if (panDrag.current && !panMoved.current && !smearActive) {
+      // Click on canvas → place a dot
+      const pos = viewportToCanvas(e.clientX, e.clientY)
+      placeDot(pos.x, pos.y)
+    }
+    panDrag.current = false
+  }
 
   // ── Pinch ─────────────────────────────────────────────────────────────────────
 
@@ -615,34 +619,34 @@ export default function App() {
     pinchDist.current = dist
   }
 
-  // ── Mesh point drag ───────────────────────────────────────────────────────────
+  // ── Dot drag ──────────────────────────────────────────────────────────────────
 
-  function onMeshPointerDown(e, id) {
+  function onDotPointerDown(e, id) {
     e.stopPropagation()
     e.currentTarget.setPointerCapture(e.pointerId)
-    const pos = presentRef.current.mesh.positions[id]
-    meshDrag.current = { id, startX: pos.x, startY: pos.y, clientX: e.clientX, clientY: e.clientY, snapshot: presentRef.current }
-    setSelectedPointId(id)
+    const dot = presentRef.current.dots.find(d => d.id === id)
+    dotDrag.current = { id, startX: dot.x, startY: dot.y, clientX: e.clientX, clientY: e.clientY, snapshot: presentRef.current }
+    setSelectedDotId(id)
+    panMoved.current = true // prevent click-to-place on pointer up
   }
-  function onMeshPointerMove(e, id) {
-    const md = meshDrag.current
-    if (!md || md.id !== id) return
-    const dx = (e.clientX - md.clientX) / viewRef.current.zoom
-    const dy = (e.clientY - md.clientY) / viewRef.current.zoom
+  function onDotPointerMove(e, id) {
+    const dd = dotDrag.current
+    if (!dd || dd.id !== id) return
+    const dx = (e.clientX - dd.clientX) / viewRef.current.zoom
+    const dy = (e.clientY - dd.clientY) / viewRef.current.zoom
     liveUpdate({
       ...presentRef.current,
-      mesh: {
-        ...presentRef.current.mesh,
-        positions: { ...presentRef.current.mesh.positions, [id]: { x: md.startX + dx, y: md.startY + dy } },
-      },
+      dots: presentRef.current.dots.map(d =>
+        d.id === id ? { ...d, x: dd.startX + dx, y: dd.startY + dy } : d
+      ),
     })
   }
-  function onMeshPointerUp(e, id) {
-    const md = meshDrag.current
-    if (!md || md.id !== id) return
-    setPast(p => [...p.slice(-(MAX_HISTORY - 1)), md.snapshot])
+  function onDotPointerUp(e, id) {
+    const dd = dotDrag.current
+    if (!dd || dd.id !== id) return
+    setPast(p => [...p.slice(-(MAX_HISTORY - 1)), dd.snapshot])
     setFuture([])
-    meshDrag.current = null
+    dotDrag.current = null
   }
 
   // ── Warp handle drag ──────────────────────────────────────────────────────────
@@ -670,52 +674,69 @@ export default function App() {
     gridDrag.current = null
   }
 
-  // ── Background operations ─────────────────────────────────────────────────────
+  // ── Color operations ──────────────────────────────────────────────────────────
 
-  function updateBackground(bg) { commit({ ...present, background: bg }) }
-
-  // ── Mesh operations ───────────────────────────────────────────────────────────
-
-  function updateMeshPoint(id, update) {
-    commit({
-      ...present,
-      mesh: {
-        ...present.mesh,
-        points: present.mesh.points.map(pt => pt.id === id ? { ...pt, ...update } : pt),
-      },
-    })
+  function addColor() {
+    const hex = COLOR_DEFAULTS[present.colors.length % COLOR_DEFAULTS.length]
+    const newColor = { id: uid(), hex }
+    commit({ ...present, colors: [...present.colors, newColor] })
+    setActiveColorId(newColor.id)
   }
 
-  function setMeshDensity(rows, cols) {
-    commit({
-      ...present,
-      mesh: {
-        rows, cols,
-        points: makeMeshPoints(rows, cols),
-        positions: makeMeshPositions(rows, cols),
-      },
-    })
-    setSelectedPointId(null)
+  function updateColor(id, updated) {
+    commit({ ...present, colors: present.colors.map(c => c.id === id ? { ...c, ...updated } : c) })
   }
 
-  function randomizeMeshColors() {
+  function deleteColor(id) {
+    // Remove the color and all dots using it
+    commit({
+      ...present,
+      colors: present.colors.filter(c => c.id !== id),
+      dots: present.dots.filter(d => d.colorId !== id),
+    })
+    if (activeColorId === id) {
+      const remaining = present.colors.filter(c => c.id !== id)
+      setActiveColorId(remaining[0]?.id ?? null)
+    }
+    if (selectedDotId) {
+      const dot = present.dots.find(d => d.id === selectedDotId)
+      if (dot?.colorId === id) setSelectedDotId(null)
+    }
+  }
+
+  // ── Dot operations ────────────────────────────────────────────────────────────
+
+  function placeDot(x, y) {
+    if (!activeColorId || !present.colors.find(c => c.id === activeColorId)) return
+    const dot = { id: uid(), colorId: activeColorId, x, y }
+    commit({ ...present, dots: [...present.dots, dot] })
+    setSelectedDotId(dot.id)
+  }
+
+  function reassignDot(dotId, colorId) {
+    commit({ ...present, dots: present.dots.map(d => d.id === dotId ? { ...d, colorId } : d) })
+  }
+
+  function deleteSelectedDot() {
+    if (!selectedDotId) return
+    commit({ ...present, dots: present.dots.filter(d => d.id !== selectedDotId) })
+    setSelectedDotId(null)
+  }
+
+  function randomizeColors() {
     const rand = seededRand(Date.now())
     commit({
       ...present,
-      mesh: {
-        ...present.mesh,
-        points: present.mesh.points.map(pt => ({
-          ...pt,
-          color: rgbToHex({ r: rand() * 255, g: rand() * 255, b: rand() * 255 }),
-        })),
-      },
+      colors: present.colors.map(c => ({
+        ...c,
+        hex: rgbToHex({ r: rand() * 255, g: rand() * 255, b: rand() * 255 }),
+      })),
     })
   }
 
-  function resetMeshPositions() {
-    const { rows, cols } = present.mesh
-    commit({ ...present, mesh: { ...present.mesh, positions: makeMeshPositions(rows, cols) } })
-  }
+  // ── Background operations ─────────────────────────────────────────────────────
+
+  function updateBackground(bg) { commit({ ...present, background: bg }) }
 
   // ── Warp operations ───────────────────────────────────────────────────────────
 
@@ -758,7 +779,7 @@ export default function App() {
   function saveCurrentPalette() {
     const name = paletteName.trim(); if (!name) return
     const all = loadPalettes()
-    all[name] = { mesh: present.mesh, background: present.background, warp: present.warp, filters: present.filters }
+    all[name] = { colors: present.colors, dots: present.dots, background: present.background, warp: present.warp, filters: present.filters }
     writePalettes(all)
     setSavedPalettes({ ...all })
     setPaletteName('')
@@ -767,20 +788,40 @@ export default function App() {
     const all = loadPalettes(); const p = all[name]; if (!p) return
     commit({
       ...present,
-      mesh: p.mesh ?? present.mesh,
+      colors: p.colors ?? present.colors,
+      dots: p.dots ?? present.dots,
       background: p.background ?? present.background,
       warp: p.warp ?? present.warp,
       filters: p.filters ?? INIT_FILTERS,
     })
-    setSelectedPointId(null)
+    setSelectedDotId(null)
+    if (p.colors?.length) setActiveColorId(p.colors[0].id)
   }
+
+  // ── Keyboard ──────────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    function onKey(e) {
+      if (e.target.tagName === 'INPUT') return
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDotId) {
+        e.preventDefault()
+        deleteSelectedDot()
+      }
+      if ((e.key === 'z' || e.key === 'Z') && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault()
+        if (e.shiftKey) redo(); else undo()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selectedDotId, past, future])
 
   // ── Derived ───────────────────────────────────────────────────────────────────
 
   const paletteNames = Object.keys(savedPalettes)
   const canUndo = past.length > 0
   const canRedo = future.length > 0
-  const selectedPoint = selectedPointId ? present.mesh.points.find(p => p.id === selectedPointId) : null
+  const selectedDot = selectedDotId ? present.dots.find(d => d.id === selectedDotId) : null
   const cssFilter = buildCSSFilter(present.filters)
   const canvasCSS = {
     display: 'block',
@@ -789,6 +830,15 @@ export default function App() {
       backgroundImage: 'repeating-conic-gradient(#666 0% 25%, #444 0% 50%)',
       backgroundSize: '16px 16px',
     }),
+  }
+  const bgPickerRef = useRef(null)
+  const [bgHexDraft, setBgHexDraft] = useState(present.background.hex)
+  useEffect(() => setBgHexDraft(present.background.hex), [present.background.hex])
+
+  function commitBgHex(val) {
+    const c = /^#/.test(val) ? val : '#' + val
+    if (/^#[0-9a-fA-F]{6}$/.test(c)) updateBackground({ ...present.background, hex: c.toLowerCase() })
+    else setBgHexDraft(present.background.hex)
   }
 
   // ── JSX ───────────────────────────────────────────────────────────────────────
@@ -805,102 +855,103 @@ export default function App() {
 
         <nav className="flex-1 overflow-y-auto min-h-0">
 
-          {/* Colors */}
+          {/* ── Colors ── */}
           <Section title="Colors" defaultOpen>
 
             {/* Background */}
             <div className="mb-3 pb-3 border-b border-white/[0.06]">
               <div className="text-[10px] text-white/30 mb-2 uppercase tracking-wide">Background</div>
-              <MiniColorPicker
-                hex={present.background.hex}
-                opacity={100}
-                onChangeHex={hex => updateBackground({ ...present.background, hex })}
-                showOpacity={false}
-              />
-              <div className="mt-2">
-                <Toggle on={present.background.transparent}
-                  onChange={v => updateBackground({ ...present.background, transparent: v })}
-                  label="Transparent" />
-              </div>
-            </div>
-
-            {/* Grid density */}
-            <div className="mb-3">
-              <div className="text-[10px] text-white/30 mb-1.5 uppercase tracking-wide">Grid</div>
-              <div className="flex gap-1">
-                {MESH_DENSITIES.map(([r, c]) => (
-                  <button key={`${r}x${c}`} onClick={() => setMeshDensity(r, c)}
-                    className={`flex-1 py-1 rounded text-[11px] font-medium transition-colors border ${
-                      present.mesh.rows === r && present.mesh.cols === c
-                        ? 'bg-violet-500/20 border-violet-500/40 text-violet-300'
-                        : 'bg-white/[0.04] border-white/[0.08] text-white/35 hover:text-white/65 hover:bg-white/[0.08]'
-                    }`}>
-                    {r}×{c}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Mesh point grid */}
-            <div className="mb-3">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[10px] text-white/30 uppercase tracking-wide">Points</span>
-                <span className="text-[10px] text-white/20">{present.mesh.cols+1}×{present.mesh.rows+1}</span>
-              </div>
-              <div style={{
-                display: 'grid',
-                gridTemplateColumns: `repeat(${present.mesh.cols + 1}, 1fr)`,
-                gap: 3,
-              }}>
-                {present.mesh.points.map(pt => (
-                  <div key={pt.id}
-                    onClick={() => setSelectedPointId(id => id === pt.id ? null : pt.id)}
-                    title={pt.id}
-                    style={{
-                      aspectRatio: '1',
-                      borderRadius: 4,
-                      background: pt.color,
-                      cursor: 'pointer',
-                      outline: pt.id === selectedPointId ? '2px solid white' : '1.5px solid rgba(255,255,255,0.08)',
-                      outlineOffset: pt.id === selectedPointId ? 1 : 0,
-                      opacity: pt.opacity / 100,
-                    }}
-                  />
-                ))}
-              </div>
-            </div>
-
-            {/* Selected point editor */}
-            {selectedPoint && (
-              <div className="mb-3 p-2.5 rounded-md bg-white/[0.04] border border-white/[0.06]">
-                <div className="text-[10px] text-white/30 mb-2 uppercase tracking-wide">
-                  {selectedPointId}
-                </div>
-                <MiniColorPicker
-                  hex={selectedPoint.color}
-                  opacity={selectedPoint.opacity}
-                  onChangeHex={color => updateMeshPoint(selectedPointId, { color })}
-                  onChangeOpacity={opacity => updateMeshPoint(selectedPointId, { opacity })}
-                  showOpacity
+              <div className="flex items-center gap-1.5 mb-2">
+                <div onClick={() => bgPickerRef.current?.click()} style={{
+                  width: 20, height: 20, borderRadius: 4, flexShrink: 0,
+                  background: present.background.hex,
+                  border: '1.5px solid rgba(255,255,255,0.12)', cursor: 'pointer',
+                }} />
+                <input ref={bgPickerRef} type="color" value={present.background.hex}
+                  onChange={e => updateBackground({ ...present.background, hex: e.target.value })}
+                  style={{ position: 'absolute', opacity: 0, width: 0, height: 0, pointerEvents: 'none' }} />
+                <input value={bgHexDraft}
+                  onChange={e => setBgHexDraft(e.target.value)}
+                  onBlur={e => commitBgHex(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && commitBgHex(bgHexDraft)}
+                  maxLength={7}
+                  className="font-mono text-[11px] text-white/60 bg-white/[0.05] border border-white/[0.08] rounded px-1.5 py-0.5 outline-none focus:border-white/20 w-[68px] shrink-0"
+                  spellCheck={false}
                 />
+              </div>
+              <Toggle on={present.background.transparent}
+                onChange={v => updateBackground({ ...present.background, transparent: v })}
+                label="Transparent" />
+            </div>
+
+            {/* Palette */}
+            <div className="mb-2">
+              <div className="text-[10px] text-white/30 mb-2 uppercase tracking-wide">
+                Palette — click to select, then click canvas to place
+              </div>
+              {present.colors.map((color, i) => (
+                <ColorRow
+                  key={color.id}
+                  label={LABELS[i] ?? (i + 1)}
+                  color={color}
+                  isActive={activeColorId === color.id}
+                  onActivate={() => setActiveColorId(color.id)}
+                  onChange={updated => updateColor(color.id, updated)}
+                  onDelete={() => deleteColor(color.id)}
+                />
+              ))}
+              {present.colors.length < 26 && (
+                <button onClick={addColor}
+                  className="w-full mt-1 flex items-center justify-center gap-1.5 py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
+                  <IconPlus /> Add color
+                </button>
+              )}
+            </div>
+
+            {/* Selected dot controls */}
+            {selectedDot && (
+              <div className="mt-3 pt-3 border-t border-white/[0.06]">
+                <div className="text-[10px] text-white/30 mb-2 uppercase tracking-wide">Selected dot — assign to</div>
+                <div className="flex gap-1.5 mb-2 flex-wrap">
+                  {present.colors.map((color, i) => (
+                    <button key={color.id}
+                      onClick={() => reassignDot(selectedDot.id, color.id)}
+                      title={LABELS[i]}
+                      style={{
+                        width: 28, height: 28, borderRadius: 6,
+                        background: color.hex,
+                        border: selectedDot.colorId === color.id
+                          ? '2.5px solid white'
+                          : '1.5px solid rgba(255,255,255,0.15)',
+                        cursor: 'pointer',
+                        position: 'relative',
+                        boxShadow: selectedDot.colorId === color.id ? '0 0 0 1.5px rgba(139,92,246,0.7)' : 'none',
+                      }}
+                    >
+                      <span style={{
+                        position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
+                        justifyContent: 'center', fontSize: 9, fontWeight: 700,
+                        color: 'rgba(255,255,255,0.8)', textShadow: '0 0 3px rgba(0,0,0,0.6)',
+                      }}>
+                        {LABELS[i]}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <button onClick={deleteSelectedDot}
+                  className="w-full py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-red-400 hover:border-red-400/30 hover:bg-red-400/[0.05] transition-colors">
+                  Delete dot
+                </button>
               </div>
             )}
 
-            {/* Actions */}
-            <div className="flex gap-1.5 mb-4">
-              <button onClick={randomizeMeshColors}
-                className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
-                <IconShuffle /> Randomize
+            {/* Randomize + palette */}
+            <div className="mt-3 pt-3 border-t border-white/[0.06]">
+              <button onClick={randomizeColors}
+                className="w-full mb-3 flex items-center justify-center gap-1.5 py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
+                <IconShuffle /> Randomize colors
               </button>
-              <button onClick={resetMeshPositions}
-                className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
-                <IconReset /> Reset pos
-              </button>
-            </div>
-
-            {/* Palette save/load */}
-            <div className="pt-3 border-t border-white/[0.06] space-y-2">
-              <div className="flex gap-1.5">
+              <div className="flex gap-1.5 mb-2">
                 <input value={paletteName} onChange={e => setPaletteName(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && saveCurrentPalette()}
                   placeholder="Palette name…"
@@ -916,13 +967,13 @@ export default function App() {
                   className="w-full bg-white/[0.05] border border-white/[0.08] rounded px-2 py-1 text-[11px] text-white/45 outline-none focus:border-white/20 cursor-pointer"
                   style={{ colorScheme: 'dark' }}>
                   <option value="" disabled>Load palette…</option>
-                  {paletteNames.map(name => <option key={name} value={name}>{name}</option>)}
+                  {paletteNames.map(n => <option key={n} value={n}>{n}</option>)}
                 </select>
               )}
             </div>
           </Section>
 
-          {/* Warp / Smear */}
+          {/* ── Warp ── */}
           <Section title="Warp">
             <div className="mb-3">
               <div className="text-[10px] text-white/30 mb-1.5 uppercase tracking-wide">Grid density</div>
@@ -939,7 +990,6 @@ export default function App() {
                 ))}
               </div>
             </div>
-
             <div className="mb-3">
               <div className="flex justify-between items-center mb-1.5">
                 <span className="text-[10px] text-white/30 uppercase tracking-wide">Intensity</span>
@@ -949,7 +999,6 @@ export default function App() {
                 onChange={e => updateWarpIntensity(+e.target.value)}
                 className="w-full accent-violet-400" style={{ cursor: 'pointer' }} />
             </div>
-
             <div className="flex gap-1.5">
               <button onClick={resetWarp}
                 className="flex-1 py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
@@ -962,7 +1011,7 @@ export default function App() {
             </div>
           </Section>
 
-          {/* Filters */}
+          {/* ── Filters ── */}
           <Section title="Filters">
             <FilterSlider label="Grain" value={present.filters.grain} min={0} max={100} unit="%" onChange={v => updateFilter('grain', v)} />
             <FilterSlider label="Blur" value={present.filters.blur} min={0} max={100} unit="%" onChange={v => updateFilter('blur', v)} />
@@ -975,7 +1024,7 @@ export default function App() {
             </button>
           </Section>
 
-          {/* Export */}
+          {/* ── Export ── */}
           <Section title="Export">
             <p className="text-white/25 text-xs">PNG, SVG, and CSS export options will appear here.</p>
           </Section>
@@ -999,11 +1048,12 @@ export default function App() {
       {/* ── Canvas area ──────────────────────────────────────────────────── */}
       <main
         ref={mainRef}
-        className="flex-1 relative overflow-hidden cursor-grab active:cursor-grabbing"
+        className="flex-1 relative overflow-hidden"
+        style={{ cursor: smearActive ? 'grab' : activeColorId ? 'crosshair' : 'grab' }}
         onPointerDown={onMainPointerDown}
         onPointerMove={onMainPointerMove}
         onPointerUp={onMainPointerUp}
-        onPointerLeave={onMainPointerUp}
+        onPointerLeave={() => { panDrag.current = false }}
         onTouchStart={onTouchStart}
         onTouchMove={onTouchMove}
       >
@@ -1055,35 +1105,43 @@ export default function App() {
               </svg>
             )}
 
-            {/* Mesh gradient handles */}
-            {!smearActive && present.mesh.points.map(pt => {
-              const pos = present.mesh.positions[pt.id]
-              if (!pos) return null
-              const selected = pt.id === selectedPointId
+            {/* Dots */}
+            {!smearActive && present.dots.map(dot => {
+              const color = present.colors.find(c => c.id === dot.colorId)
+              if (!color) return null
+              const colorIndex = present.colors.indexOf(color)
+              const label = LABELS[colorIndex] ?? ''
+              const selected = dot.id === selectedDotId
               return (
-                <div key={pt.id} data-no-pan=""
-                  onPointerDown={e => onMeshPointerDown(e, pt.id)}
-                  onPointerMove={e => onMeshPointerMove(e, pt.id)}
-                  onPointerUp={e => onMeshPointerUp(e, pt.id)}
+                <div key={dot.id} data-no-pan=""
+                  onPointerDown={e => onDotPointerDown(e, dot.id)}
+                  onPointerMove={e => onDotPointerMove(e, dot.id)}
+                  onPointerUp={e => onDotPointerUp(e, dot.id)}
                   style={{
-                    position: 'absolute', left: pos.x, top: pos.y,
+                    position: 'absolute', left: dot.x, top: dot.y,
                     transform: 'translate(-50%, -50%)',
-                    width: selected ? 18 : 12,
-                    height: selected ? 18 : 12,
-                    borderRadius: '50%',
-                    background: pt.color,
-                    border: selected ? '2.5px solid white' : '1.5px solid rgba(255,255,255,0.75)',
+                    width: 22, height: 22, borderRadius: '50%',
+                    background: color.hex,
+                    border: selected ? '2.5px solid white' : '1.5px solid rgba(255,255,255,0.8)',
                     boxShadow: selected
                       ? '0 0 0 2.5px rgba(139,92,246,0.85), 0 2px 8px rgba(0,0,0,0.5)'
-                      : '0 1px 4px rgba(0,0,0,0.45)',
+                      : '0 1px 5px rgba(0,0,0,0.5)',
                     cursor: 'move', touchAction: 'none', zIndex: 10,
-                    transition: 'width 0.12s, height 0.12s, box-shadow 0.12s',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
                   }}
-                />
+                >
+                  <span style={{
+                    fontSize: 9, fontWeight: 800, color: 'rgba(255,255,255,0.9)',
+                    textShadow: '0 0 4px rgba(0,0,0,0.7)',
+                    userSelect: 'none', pointerEvents: 'none', lineHeight: 1,
+                  }}>
+                    {label}
+                  </span>
+                </div>
               )
             })}
 
-            {/* Warp grid overlay */}
+            {/* Warp grid */}
             {smearActive && (
               <WarpGrid
                 N={present.warp.N}
