@@ -54,8 +54,8 @@ function makeDisplacements(N) {
   return Array.from({ length: N * N }, () => ({ dx: 0, dy: 0 }))
 }
 
-function getOrigPos(row, col, N) {
-  return { x: col * CANVAS_W / (N - 1), y: row * CANVAS_H / (N - 1) }
+function getOrigPos(row, col, N, W, H) {
+  return { x: col * W / (N - 1), y: row * H / (N - 1) }
 }
 
 function buildCSSFilter({ blur, contrast, brightness, hue }) {
@@ -87,6 +87,7 @@ const INIT_WARP = { N: 5, displacements: makeDisplacements(5), intensity: 100 }
 
 const INIT_DOC = {
   background: { hex: '#050510', transparent: false },
+  size: { w: 800, h: 600 },
   sharpness: 2,
   colors: INIT_COLORS,
   dots: INIT_DOTS,
@@ -97,8 +98,8 @@ const INIT_DOC = {
 // ─── Render pipeline ──────────────────────────────────────────────────────────
 
 function renderMeshGradient(interCanvas, offCtx, { background, sharpness = 2, colors, dots }) {
-  const W = CANVAS_W, H = CANVAS_H
-  const IW = INTER_W, IH = INTER_H
+  const W = offCtx.canvas.width, H = offCtx.canvas.height
+  const IW = interCanvas.width, IH = interCanvas.height
   const scaleX = W / IW, scaleY = H / IH
   const p = sharpness
 
@@ -172,7 +173,7 @@ function renderMeshGradient(interCanvas, offCtx, { background, sharpness = 2, co
 
 function applyWarp(visCtx, offscreen, { N, displacements, intensity }) {
   const scale = intensity / 100
-  const W = CANVAS_W, H = CANVAS_H
+  const W = offscreen.width, H = offscreen.height
 
   const dxArr = new Float32Array(N * N)
   const dyArr = new Float32Array(N * N)
@@ -403,9 +404,9 @@ function ColorRow({ label, color, isActive, onActivate, onChange, onDelete }) {
 
 // ─── WarpGrid overlay ─────────────────────────────────────────────────────────
 
-function WarpGrid({ N, displacements, onPointerDown, onPointerMove, onPointerUp }) {
+function WarpGrid({ N, cW, cH, displacements, onPointerDown, onPointerMove, onPointerUp }) {
   function dp(row, col) {
-    const orig = getOrigPos(row, col, N)
+    const orig = getOrigPos(row, col, N, cW, cH)
     const d = displacements[row * N + col]
     return { x: orig.x + d.dx, y: orig.y + d.dy }
   }
@@ -447,7 +448,7 @@ function WarpGrid({ N, displacements, onPointerDown, onPointerMove, onPointerUp 
   return (
     <svg style={{
       position: 'absolute', left: 0, top: 0,
-      width: CANVAS_W, height: CANVAS_H,
+      width: cW, height: cH,
       overflow: 'visible', pointerEvents: 'none',
     }}>
       {lines}
@@ -507,6 +508,9 @@ export default function App() {
     syncPresent(next)
   }
 
+  const cW = present.size?.w ?? CANVAS_W
+  const cH = present.size?.h ?? CANVAS_H
+
   // ── View ─────────────────────────────────────────────────────────────────────
 
   const viewRef = useRef({ zoom: 1, pan: { x: 0, y: 0 } })
@@ -538,14 +542,26 @@ export default function App() {
   const gridDrag = useRef(null)
   const ellipseDrag = useRef(null)
   const pinchDist = useRef(null)
+  const spaceHeld = useRef(false)
+  const [spaceDown, setSpaceDown] = useState(false)
+  const [boxSelect, setBoxSelect] = useState(null)
+  const boxSelectRef = useRef(null)
 
   // ── UI state ─────────────────────────────────────────────────────────────────
 
   const [smearActive, setSmearActive] = useState(false)
   const [activeColorId, setActiveColorId] = useState(INIT_COLORS[0].id)
-  const [selectedDotId, setSelectedDotId] = useState(null)
+  const [selectedDotIds, _setSelectedDotIds] = useState(() => new Set())
+  const selectedDotIdsRef = useRef(new Set())
+  function setSelectedDotIds(val) {
+    const next = typeof val === 'function' ? val(selectedDotIdsRef.current) : val
+    selectedDotIdsRef.current = next
+    _setSelectedDotIds(next)
+  }
   const [paletteName, setPaletteName] = useState('')
   const [savedPalettes, setSavedPalettes] = useState(loadPalettes)
+  const [wDraft, setWDraft] = useState(String(CANVAS_W))
+  const [hDraft, setHDraft] = useState(String(CANVAS_H))
 
   // ── Canvas render ─────────────────────────────────────────────────────────────
 
@@ -554,6 +570,14 @@ export default function App() {
     const offscreen = offscreenRef.current
     const inter = interRef.current
     if (!canvas || !offscreen || !inter) return
+    const IW = Math.max(1, Math.round(cW / 5))
+    const IH = Math.max(1, Math.round(cH / 5))
+    if (offscreen.width !== cW || offscreen.height !== cH) {
+      offscreen.width = cW; offscreen.height = cH
+    }
+    if (inter.width !== IW || inter.height !== IH) {
+      inter.width = IW; inter.height = IH
+    }
     const offCtx = offscreen.getContext('2d')
     renderMeshGradient(inter, offCtx, present)
     const ctx = canvas.getContext('2d')
@@ -580,54 +604,91 @@ export default function App() {
     return () => el.removeEventListener('wheel', onWheel)
   }, [])
 
+  // ── Space key (pan mode) ──────────────────────────────────────────────────────
+
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.code === 'Space' && !e.target.matches('input, textarea')) {
+        e.preventDefault()
+        if (!spaceHeld.current) { spaceHeld.current = true; setSpaceDown(true) }
+      }
+    }
+    function onKeyUp(e) {
+      if (e.code === 'Space') { spaceHeld.current = false; setSpaceDown(false) }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp) }
+  }, [])
+
   // ── Canvas coordinate conversion ──────────────────────────────────────────────
 
   function viewportToCanvas(clientX, clientY) {
     const rect = mainRef.current.getBoundingClientRect()
     const { zoom, pan } = viewRef.current
+    const W = presentRef.current.size?.w ?? CANVAS_W
+    const H = presentRef.current.size?.h ?? CANVAS_H
     const ox = clientX - (rect.left + rect.width / 2) - pan.x
     const oy = clientY - (rect.top + rect.height / 2) - pan.y
-    return { x: ox / zoom + CANVAS_W / 2, y: oy / zoom + CANVAS_H / 2 }
+    return { x: ox / zoom + W / 2, y: oy / zoom + H / 2 }
   }
 
   function canvasToViewport(cx, cy) {
     const { width, height } = mainRef.current.getBoundingClientRect()
     return {
-      x: width / 2 + view.pan.x + (cx - CANVAS_W / 2) * view.zoom,
-      y: height / 2 + view.pan.y + (cy - CANVAS_H / 2) * view.zoom,
+      x: width / 2 + view.pan.x + (cx - cW / 2) * view.zoom,
+      y: height / 2 + view.pan.y + (cy - cH / 2) * view.zoom,
     }
   }
 
   // ── Canvas pan + click-to-place ────────────────────────────────────────────────
 
-  const clickMoved = useRef(false)
-
-  const pointerDownOnCanvas = useRef(false)
-
   function onMainPointerDown(e) {
-    if (e.target.closest('button, input, select, [data-no-pan]')) {
-      pointerDownOnCanvas.current = false
-      return
-    }
-    pointerDownOnCanvas.current = true
-    panDrag.current = true
-    clickMoved.current = false
-    panLast.current = { x: e.clientX, y: e.clientY }
+    if (e.target.closest('button, input, select, [data-no-pan]')) return
     e.currentTarget.setPointerCapture(e.pointerId)
+    if (spaceHeld.current) {
+      panDrag.current = true
+      panLast.current = { x: e.clientX, y: e.clientY }
+    } else {
+      const bs = { startX: e.clientX, startY: e.clientY, curX: e.clientX, curY: e.clientY, shiftKey: e.shiftKey }
+      boxSelectRef.current = bs
+      setBoxSelect({ ...bs })
+    }
   }
   function onMainPointerMove(e) {
-    if (!panDrag.current) return
-    const dx = e.clientX - panLast.current.x
-    const dy = e.clientY - panLast.current.y
-    if (Math.hypot(dx, dy) > 4) clickMoved.current = true
-    panLast.current = { x: e.clientX, y: e.clientY }
-    const v = viewRef.current
-    setView({ ...v, pan: { x: v.pan.x + dx, y: v.pan.y + dy } })
+    if (panDrag.current) {
+      const dx = e.clientX - panLast.current.x
+      const dy = e.clientY - panLast.current.y
+      panLast.current = { x: e.clientX, y: e.clientY }
+      const v = viewRef.current
+      setView({ ...v, pan: { x: v.pan.x + dx, y: v.pan.y + dy } })
+    } else if (boxSelectRef.current) {
+      boxSelectRef.current = { ...boxSelectRef.current, curX: e.clientX, curY: e.clientY }
+      setBoxSelect({ ...boxSelectRef.current })
+    }
   }
   function onMainPointerUp() {
-    if (pointerDownOnCanvas.current && !clickMoved.current && selectedDotId) setSelectedDotId(null)
-    panDrag.current = false
-    pointerDownOnCanvas.current = false
+    if (panDrag.current) {
+      panDrag.current = false
+      return
+    }
+    const bs = boxSelectRef.current
+    if (!bs) return
+    boxSelectRef.current = null
+    setBoxSelect(null)
+    const moved = Math.hypot(bs.curX - bs.startX, bs.curY - bs.startY) > 6
+    if (!moved) {
+      // Plain click on empty canvas → deselect all
+      setSelectedDotIds(new Set())
+      return
+    }
+    // Box select: collect dots whose center falls inside the rectangle
+    const p1 = viewportToCanvas(Math.min(bs.startX, bs.curX), Math.min(bs.startY, bs.curY))
+    const p2 = viewportToCanvas(Math.max(bs.startX, bs.curX), Math.max(bs.startY, bs.curY))
+    const inside = new Set(presentRef.current.dots
+      .filter(d => d.x >= p1.x && d.x <= p2.x && d.y >= p1.y && d.y <= p2.y)
+      .map(d => d.id))
+    setSelectedDotIds(bs.shiftKey ? prev => new Set([...prev, ...inside]) : inside)
   }
 
   function onMainDoubleClick(e) {
@@ -661,27 +722,48 @@ export default function App() {
 
   function onDotPointerDown(e, id) {
     e.stopPropagation()
+
+    if (e.shiftKey) {
+      // Shift-click toggles membership without starting a drag
+      setSelectedDotIds(prev => {
+        const next = new Set(prev)
+        if (next.has(id)) next.delete(id); else next.add(id)
+        return next
+      })
+      return
+    }
+
     e.currentTarget.setPointerCapture(e.pointerId)
-    const dot = presentRef.current.dots.find(d => d.id === id)
-    dotDrag.current = { id, startX: dot.x, startY: dot.y, clientX: e.clientX, clientY: e.clientY, snapshot: presentRef.current }
-    setSelectedDotId(id)
+
+    // If the clicked dot isn't already selected, replace the selection
+    const currentIds = selectedDotIdsRef.current
+    const effectiveIds = currentIds.has(id) ? currentIds : new Set([id])
+    if (!currentIds.has(id)) setSelectedDotIds(new Set([id]))
+
+    // Record start position for every dot in the effective selection
+    const startPositions = {}
+    presentRef.current.dots.forEach(d => {
+      if (effectiveIds.has(d.id)) startPositions[d.id] = { x: d.x, y: d.y }
+    })
+    dotDrag.current = { anchorId: id, startPositions, clientX: e.clientX, clientY: e.clientY, snapshot: presentRef.current }
   }
   function onDotPointerMove(e, id) {
     const dd = dotDrag.current
-    if (!dd || dd.id !== id) return
+    if (!dd || dd.anchorId !== id) return
     const dx = (e.clientX - dd.clientX) / viewRef.current.zoom
     const dy = (e.clientY - dd.clientY) / viewRef.current.zoom
     liveUpdate({
       ...presentRef.current,
-      dots: presentRef.current.dots.map(d =>
-        d.id === id ? { ...d, x: dd.startX + dx, y: dd.startY + dy } : d
-      ),
+      dots: presentRef.current.dots.map(d => {
+        const start = dd.startPositions[d.id]
+        return start ? { ...d, x: start.x + dx, y: start.y + dy } : d
+      }),
     })
   }
   function onDotPointerUp(e, id) {
     e.stopPropagation()
     const dd = dotDrag.current
-    if (!dd || dd.id !== id) return
+    if (!dd || dd.anchorId !== id) return
     setPast(p => [...p.slice(-(MAX_HISTORY - 1)), dd.snapshot])
     setFuture([])
     dotDrag.current = null
@@ -796,10 +878,10 @@ export default function App() {
       const remaining = present.colors.filter(c => c.id !== id)
       setActiveColorId(remaining[0]?.id ?? null)
     }
-    if (selectedDotId) {
-      const dot = present.dots.find(d => d.id === selectedDotId)
-      if (dot?.colorId === id) setSelectedDotId(null)
-    }
+    // Remove dots of deleted color from selection
+    const deletedIds = new Set(present.dots.filter(d => d.colorId === id).map(d => d.id))
+    if ([...deletedIds].some(id => selectedDotIds.has(id)))
+      setSelectedDotIds(prev => new Set([...prev].filter(id => !deletedIds.has(id))))
   }
 
   // ── Dot operations ────────────────────────────────────────────────────────────
@@ -808,17 +890,17 @@ export default function App() {
     if (!activeColorId || !present.colors.find(c => c.id === activeColorId)) return
     const dot = { id: uid(), colorId: activeColorId, x, y, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 }
     commit({ ...present, dots: [...present.dots, dot] })
-    setSelectedDotId(dot.id)
+    setSelectedDotIds(new Set([dot.id]))
   }
 
   function reassignDot(dotId, colorId) {
     commit({ ...present, dots: present.dots.map(d => d.id === dotId ? { ...d, colorId } : d) })
   }
 
-  function deleteSelectedDot() {
-    if (!selectedDotId) return
-    commit({ ...present, dots: present.dots.filter(d => d.id !== selectedDotId) })
-    setSelectedDotId(null)
+  function deleteSelectedDots() {
+    if (selectedDotIds.size === 0) return
+    commit({ ...present, dots: present.dots.filter(d => !selectedDotIds.has(d.id)) })
+    setSelectedDotIds(new Set())
   }
 
   function randomizeColors() {
@@ -836,6 +918,32 @@ export default function App() {
 
   function updateBackground(bg) { commit({ ...present, background: bg }) }
 
+  function setSize(newW, newH) {
+    const w = Math.max(100, Math.min(4000, Math.round(newW)))
+    const h = Math.max(100, Math.min(4000, Math.round(newH)))
+    if (w === cW && h === cH) return
+    const sX = w / cW, sY = h / cH
+    commit({
+      ...present,
+      size: { w, h },
+      dots: present.dots.map(d => ({
+        ...d,
+        x: d.x * sX, y: d.y * sY,
+        rx: (d.rx ?? DEFAULT_RX) * sX,
+        ry: (d.ry ?? DEFAULT_RY) * sY,
+      })),
+    })
+  }
+
+  function exportPNG() {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const link = document.createElement('a')
+    link.download = 'hazy-gradient.png'
+    link.href = canvas.toDataURL('image/png')
+    link.click()
+  }
+
   // ── Warp operations ───────────────────────────────────────────────────────────
 
   function setGridDensity(n) {
@@ -850,7 +958,7 @@ export default function App() {
   function randomizeWarp() {
     const { N } = present.warp
     const rand = seededRand(Date.now())
-    const maxDisp = Math.min(CANVAS_W, CANVAS_H) / (N - 1) * 0.45
+    const maxDisp = Math.min(cW, cH) / (N - 1) * 0.45
     commit({
       ...present,
       warp: {
@@ -892,7 +1000,7 @@ export default function App() {
       warp: p.warp ?? present.warp,
       filters: p.filters ?? INIT_FILTERS,
     })
-    setSelectedDotId(null)
+    setSelectedDotIds(new Set())
     if (p.colors?.length) setActiveColorId(p.colors[0].id)
   }
   function deletePalette(name) {
@@ -913,9 +1021,9 @@ export default function App() {
         return
       }
       if (e.target.tagName === 'INPUT') return
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDotId) {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDotIds.size > 0) {
         e.preventDefault()
-        deleteSelectedDot()
+        deleteSelectedDots()
       }
       if ((e.key === 'z' || e.key === 'Z') && (e.metaKey || e.ctrlKey)) {
         e.preventDefault()
@@ -924,14 +1032,16 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selectedDotId, past, future])
+  }, [selectedDotIds, past, future])
 
   // ── Derived ───────────────────────────────────────────────────────────────────
 
   const paletteNames = Object.keys(savedPalettes)
   const canUndo = past.length > 0
   const canRedo = future.length > 0
-  const selectedDot = selectedDotId ? present.dots.find(d => d.id === selectedDotId) : null
+  const selectedDot = selectedDotIds.size === 1
+    ? present.dots.find(d => d.id === [...selectedDotIds][0]) ?? null
+    : null
   const cssFilter = buildCSSFilter(present.filters)
   const canvasCSS = {
     display: 'block',
@@ -944,6 +1054,7 @@ export default function App() {
   const bgPickerRef = useRef(null)
   const [bgHexDraft, setBgHexDraft] = useState(present.background.hex)
   useEffect(() => setBgHexDraft(present.background.hex), [present.background.hex])
+  useEffect(() => { setWDraft(String(cW)); setHDraft(String(cH)) }, [cW, cH])
 
   function commitBgHex(val) {
     const c = /^#/.test(val) ? val : '#' + val
@@ -959,8 +1070,12 @@ export default function App() {
       {/* ── Sidebar ─────────────────────────────────────────────────────── */}
       <aside className="w-80 shrink-0 flex flex-col bg-[#181818] border-r border-white/[0.07]">
 
-        <div className="h-12 flex items-center px-5 border-b border-white/[0.07] shrink-0">
+        <div className="h-12 flex items-center justify-between px-5 border-b border-white/[0.07] shrink-0">
           <span className="text-white text-[17px] font-semibold tracking-tight">Hazy</span>
+          <button onClick={exportPNG}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium text-white/45 border border-white/[0.08] hover:text-white/80 hover:border-white/20 hover:bg-white/[0.06] transition-colors">
+            Export PNG
+          </button>
         </div>
 
         <nav className="flex-1 overflow-y-auto min-h-0">
@@ -1113,9 +1228,26 @@ export default function App() {
             </button>
           </Section>
 
-          {/* ── Export ── */}
-          <Section title="Export">
-            <p className="text-white/25 text-xs">PNG, SVG, and CSS export options will appear here.</p>
+          {/* ── Size ── */}
+          <Section title="Size">
+            <div className="flex gap-3">
+              {[['W', wDraft, setWDraft, v => setSize(v, cH)], ['H', hDraft, setHDraft, v => setSize(cW, v)]].map(([label, draft, setDraft, commit]) => (
+                <div key={label} className="flex-1">
+                  <div className="text-[10px] text-white/30 mb-1.5 uppercase tracking-wide">{label}</div>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number" min={100} max={4000} value={draft}
+                      onChange={e => setDraft(e.target.value)}
+                      onBlur={e => commit(Number(e.target.value))}
+                      onKeyDown={e => e.key === 'Enter' && commit(Number(draft))}
+                      className="w-full bg-white/[0.05] border border-white/[0.08] rounded px-2 py-1 text-[11px] text-white/60 outline-none focus:border-white/20 tabular-nums"
+                      style={{ colorScheme: 'dark' }}
+                    />
+                    <span className="text-[10px] text-white/25 shrink-0">px</span>
+                  </div>
+                </div>
+              ))}
+            </div>
           </Section>
 
         </nav>
@@ -1138,30 +1270,47 @@ export default function App() {
       <main
         ref={mainRef}
         className="flex-1 relative overflow-hidden"
-        style={{ cursor: smearActive ? 'grab' : activeColorId ? 'crosshair' : 'grab' }}
+        style={{ cursor: spaceDown ? 'grab' : activeColorId && !smearActive ? 'crosshair' : 'default' }}
         onPointerDown={onMainPointerDown}
         onPointerMove={onMainPointerMove}
         onPointerUp={onMainPointerUp}
-        onPointerLeave={() => { panDrag.current = false }}
+        onPointerLeave={() => { panDrag.current = false; boxSelectRef.current = null; setBoxSelect(null) }}
         onDoubleClick={onMainDoubleClick}
         onTouchStart={onTouchStart}
         onTouchMove={onTouchMove}
       >
-        {/* Smear toggle */}
-        <div className="absolute top-3 left-3 z-20">
-          <button
-            data-no-pan=""
-            onClick={() => setSmearActive(a => !a)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium transition-all select-none ${
-              smearActive
-                ? 'bg-violet-500/25 border border-violet-400/40 text-violet-300 shadow-lg shadow-violet-900/20'
-                : 'bg-black/40 border border-white/10 text-white/45 hover:text-white/75 hover:bg-black/55'
-            }`}
-            style={{ backdropFilter: 'blur(8px)' }}
-          >
-            <IconGrid />
-            {smearActive ? 'Smear: ON' : 'Smear'}
-          </button>
+        {/* Mode switcher */}
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 select-none" data-no-pan="">
+          <div style={{
+            display: 'flex', gap: 2, padding: 3,
+            background: 'rgba(0,0,0,0.55)',
+            border: '1px solid rgba(255,255,255,0.09)',
+            borderRadius: 10,
+            backdropFilter: 'blur(10px)',
+          }}>
+            {[['Compose', false], ['Warp', true]].map(([label, isWarp]) => (
+              <button key={label} data-no-pan=""
+                onClick={() => setSmearActive(isWarp)}
+                style={{
+                  padding: '4px 14px',
+                  borderRadius: 7,
+                  fontSize: 11, fontWeight: 500,
+                  border: 'none', cursor: 'pointer',
+                  transition: 'background 0.15s, color 0.15s',
+                  background: smearActive === isWarp
+                    ? 'rgba(139,92,246,0.28)'
+                    : 'transparent',
+                  color: smearActive === isWarp
+                    ? 'rgba(196,181,253,1)'
+                    : 'rgba(255,255,255,0.38)',
+                  boxShadow: smearActive === isWarp
+                    ? 'inset 0 0 0 1px rgba(139,92,246,0.4)'
+                    : 'none',
+                }}>
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Canvas + overlays */}
@@ -1174,13 +1323,13 @@ export default function App() {
             pointerEvents: 'auto',
             boxShadow: '0 24px 80px rgba(0,0,0,0.75), 0 8px 24px rgba(0,0,0,0.5)',
           }}>
-            <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} style={canvasCSS} />
+            <canvas ref={canvasRef} width={cW} height={cH} style={canvasCSS} />
 
             {/* Grain overlay */}
             {present.filters.grain > 0 && (
               <svg style={{
                 position: 'absolute', left: 0, top: 0,
-                width: CANVAS_W, height: CANVAS_H,
+                width: cW, height: cH,
                 pointerEvents: 'none',
                 mixBlendMode: 'overlay',
                 opacity: present.filters.grain / 200,
@@ -1191,7 +1340,7 @@ export default function App() {
                     <feColorMatrix type="saturate" values="0" />
                   </filter>
                 </defs>
-                <rect width={CANVAS_W} height={CANVAS_H} filter="url(#hazy-grain)" />
+                <rect width={cW} height={cH} filter="url(#hazy-grain)" />
               </svg>
             )}
 
@@ -1201,7 +1350,7 @@ export default function App() {
               if (!color) return null
               const colorIndex = present.colors.indexOf(color)
               const label = LABELS[colorIndex] ?? ''
-              const selected = dot.id === selectedDotId
+              const selected = selectedDotIds.has(dot.id)
               return (
                 <div key={dot.id} data-no-pan=""
                   onPointerDown={e => onDotPointerDown(e, dot.id)}
@@ -1235,6 +1384,7 @@ export default function App() {
             {smearActive && (
               <WarpGrid
                 N={present.warp.N}
+                cW={cW} cH={cH}
                 displacements={present.warp.displacements}
                 onPointerDown={onGridPointerDown}
                 onPointerMove={onGridPointerMove}
@@ -1244,8 +1394,8 @@ export default function App() {
           </div>
         </div>
 
-        {/* Ellipse + resize/rotate handles for selected dot */}
-        {selectedDot && !smearActive && mainRef.current && (() => {
+        {/* Ellipse + resize/rotate handles — only for single selection */}
+        {selectedDotIds.size === 1 && selectedDot && !smearActive && mainRef.current && (() => {
           const sc = canvasToViewport(selectedDot.x, selectedDot.y)
           const rx = selectedDot.rx ?? DEFAULT_RX
           const ry = selectedDot.ry ?? DEFAULT_RY
@@ -1326,11 +1476,11 @@ export default function App() {
           )
         })()}
 
-        {/* Dot tooltip */}
-        {selectedDot && mainRef.current && (() => {
+        {/* Dot tooltip — single selection */}
+        {selectedDotIds.size === 1 && selectedDot && mainRef.current && (() => {
           const { width, height } = mainRef.current.getBoundingClientRect()
-          const tx = width / 2 + view.pan.x + (selectedDot.x - CANVAS_W / 2) * view.zoom
-          const ty = height / 2 + view.pan.y + (selectedDot.y - CANVAS_H / 2) * view.zoom
+          const tx = width / 2 + view.pan.x + (selectedDot.x - cW / 2) * view.zoom
+          const ty = height / 2 + view.pan.y + (selectedDot.y - cH / 2) * view.zoom
           return (
             <div style={{
               position: 'absolute',
@@ -1371,7 +1521,7 @@ export default function App() {
                   )
                 })}
                 <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.09)', flexShrink: 0, margin: '0 1px' }} />
-                <button onClick={e => { e.stopPropagation(); deleteSelectedDot() }}
+                <button onClick={e => { e.stopPropagation(); deleteSelectedDots() }}
                   style={{
                     width: 26, height: 26, borderRadius: 7, flexShrink: 0,
                     background: 'transparent', border: '1px solid rgba(255,255,255,0.1)',
@@ -1394,6 +1544,75 @@ export default function App() {
                 transform: 'rotate(45deg)',
               }} />
             </div>
+          )
+        })()}
+
+        {/* Multi-select tooltip */}
+        {selectedDotIds.size > 1 && mainRef.current && (() => {
+          const selDots = present.dots.filter(d => selectedDotIds.has(d.id))
+          const cx = selDots.reduce((s, d) => s + d.x, 0) / selDots.length
+          const cy = selDots.reduce((s, d) => s + d.y, 0) / selDots.length
+          const sc = canvasToViewport(cx, cy)
+          return (
+            <div style={{
+              position: 'absolute',
+              left: sc.x, top: sc.y,
+              transform: `translate(-50%, calc(-100% - ${Math.round(14 * view.zoom)}px))`,
+              zIndex: 30, pointerEvents: 'auto',
+            }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                background: 'rgba(18,18,22,0.97)',
+                border: '1px solid rgba(255,255,255,0.11)',
+                borderRadius: 10, padding: '6px 10px',
+                backdropFilter: 'blur(14px)',
+                boxShadow: '0 8px 32px rgba(0,0,0,0.55)',
+              }}>
+                <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', userSelect: 'none' }}>
+                  {selectedDotIds.size} dots
+                </span>
+                <div style={{ width: 1, height: 14, background: 'rgba(255,255,255,0.09)' }} />
+                <button onClick={e => { e.stopPropagation(); deleteSelectedDots() }}
+                  style={{
+                    background: 'transparent', border: '1px solid rgba(255,255,255,0.1)',
+                    borderRadius: 6, padding: '3px 8px',
+                    fontSize: 11, color: 'rgba(255,255,255,0.35)', cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', gap: 4,
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.18)'; e.currentTarget.style.color = 'rgb(239,68,68)' }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.35)' }}
+                >
+                  <IconTrash /> Delete
+                </button>
+              </div>
+              <div style={{
+                position: 'absolute', bottom: -5, left: '50%', marginLeft: -5,
+                width: 10, height: 10,
+                background: 'rgba(18,18,22,0.97)',
+                border: '1px solid rgba(255,255,255,0.11)',
+                borderTop: 'none', borderLeft: 'none',
+                transform: 'rotate(45deg)',
+              }} />
+            </div>
+          )
+        })()}
+
+        {/* Box-select rectangle */}
+        {boxSelect && mainRef.current && (() => {
+          const rect = mainRef.current.getBoundingClientRect()
+          const x1 = Math.min(boxSelect.startX, boxSelect.curX) - rect.left
+          const y1 = Math.min(boxSelect.startY, boxSelect.curY) - rect.top
+          const x2 = Math.max(boxSelect.startX, boxSelect.curX) - rect.left
+          const y2 = Math.max(boxSelect.startY, boxSelect.curY) - rect.top
+          const w = x2 - x1, h = y2 - y1
+          if (w < 4 && h < 4) return null
+          return (
+            <div style={{
+              position: 'absolute', left: x1, top: y1, width: w, height: h,
+              border: '1px solid rgba(139,92,246,0.7)',
+              background: 'rgba(139,92,246,0.08)',
+              pointerEvents: 'none', zIndex: 15,
+            }} />
           )
         })()}
 
