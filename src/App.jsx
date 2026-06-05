@@ -887,7 +887,7 @@ export default function App() {
             {/* Palette */}
             <div className="mb-2">
               <div className="text-[10px] text-white/30 mb-2 uppercase tracking-wide">
-                Palette — click to select, then click canvas to place
+                Palette
               </div>
               {present.colors.map((color, i) => (
                 <ColorRow
@@ -908,42 +908,6 @@ export default function App() {
               )}
             </div>
 
-            {/* Selected dot controls */}
-            {selectedDot && (
-              <div className="mt-3 pt-3 border-t border-white/[0.06]">
-                <div className="text-[10px] text-white/30 mb-2 uppercase tracking-wide">Selected dot — assign to</div>
-                <div className="flex gap-1.5 mb-2 flex-wrap">
-                  {present.colors.map((color, i) => (
-                    <button key={color.id}
-                      onClick={() => reassignDot(selectedDot.id, color.id)}
-                      title={LABELS[i]}
-                      style={{
-                        width: 28, height: 28, borderRadius: 6,
-                        background: color.hex,
-                        border: selectedDot.colorId === color.id
-                          ? '2.5px solid white'
-                          : '1.5px solid rgba(255,255,255,0.15)',
-                        cursor: 'pointer',
-                        position: 'relative',
-                        boxShadow: selectedDot.colorId === color.id ? '0 0 0 1.5px rgba(139,92,246,0.7)' : 'none',
-                      }}
-                    >
-                      <span style={{
-                        position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
-                        justifyContent: 'center', fontSize: 9, fontWeight: 700,
-                        color: 'rgba(255,255,255,0.8)', textShadow: '0 0 3px rgba(0,0,0,0.6)',
-                      }}>
-                        {LABELS[i]}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-                <button onClick={deleteSelectedDot}
-                  className="w-full py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-red-400 hover:border-red-400/30 hover:bg-red-400/[0.05] transition-colors">
-                  Delete dot
-                </button>
-              </div>
-            )}
 
             {/* Randomize + palette */}
             <div className="mt-3 pt-3 border-t border-white/[0.06]">
@@ -1153,6 +1117,77 @@ export default function App() {
             )}
           </div>
         </div>
+
+        {/* Dot tooltip */}
+        {selectedDot && mainRef.current && (() => {
+          const { width, height } = mainRef.current.getBoundingClientRect()
+          const tx = width / 2 + view.pan.x + (selectedDot.x - CANVAS_W / 2) * view.zoom
+          const ty = height / 2 + view.pan.y + (selectedDot.y - CANVAS_H / 2) * view.zoom
+          return (
+            <div style={{
+              position: 'absolute',
+              left: tx, top: ty,
+              transform: `translate(-50%, calc(-100% - ${Math.round(14 * view.zoom)}px))`,
+              zIndex: 30, pointerEvents: 'auto',
+            }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                background: 'rgba(18,18,22,0.97)',
+                border: '1px solid rgba(255,255,255,0.11)',
+                borderRadius: 10, padding: '6px 8px',
+                backdropFilter: 'blur(14px)',
+                boxShadow: '0 8px 32px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.3)',
+              }}>
+                {present.colors.map((color, i) => {
+                  const active = selectedDot.colorId === color.id
+                  return (
+                    <button key={color.id}
+                      onClick={e => { e.stopPropagation(); reassignDot(selectedDot.id, color.id) }}
+                      style={{
+                        width: 26, height: 26, borderRadius: 7, flexShrink: 0,
+                        background: color.hex, cursor: 'pointer', position: 'relative',
+                        border: active ? '2.5px solid white' : '1.5px solid rgba(255,255,255,0.18)',
+                        boxShadow: active ? '0 0 0 1.5px rgba(139,92,246,0.75)' : 'none',
+                      }}
+                    >
+                      <span style={{
+                        position: 'absolute', inset: 0,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: 9, fontWeight: 800,
+                        color: 'rgba(255,255,255,0.88)', textShadow: '0 0 4px rgba(0,0,0,0.7)',
+                        pointerEvents: 'none',
+                      }}>
+                        {LABELS[i]}
+                      </span>
+                    </button>
+                  )
+                })}
+                <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.09)', flexShrink: 0, margin: '0 1px' }} />
+                <button onClick={e => { e.stopPropagation(); deleteSelectedDot() }}
+                  style={{
+                    width: 26, height: 26, borderRadius: 7, flexShrink: 0,
+                    background: 'transparent', border: '1px solid rgba(255,255,255,0.1)',
+                    cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    color: 'rgba(255,255,255,0.35)',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.18)'; e.currentTarget.style.color = 'rgb(239,68,68)' }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.35)' }}
+                >
+                  <IconTrash />
+                </button>
+              </div>
+              {/* Arrow */}
+              <div style={{
+                position: 'absolute', bottom: -5, left: '50%', marginLeft: -5,
+                width: 10, height: 10,
+                background: 'rgba(18,18,22,0.97)',
+                border: '1px solid rgba(255,255,255,0.11)',
+                borderTop: 'none', borderLeft: 'none',
+                transform: 'rotate(45deg)',
+              }} />
+            </div>
+          )
+        })()}
 
         {/* Zoom badge */}
         <div className="absolute bottom-4 right-4 select-none text-[11px] tabular-nums"
