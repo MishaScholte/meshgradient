@@ -1374,12 +1374,6 @@ export default function App() {
                 label="Transparent" />
             </div>
 
-            {/* Sharpness */}
-            <div className="mb-3 pb-3 border-b border-white/[0.06]">
-              <FilterSlider label="Sharpness" value={present.sharpness} min={1} max={8} step={0.5} unit=""
-                onChange={v => commit({ ...present, sharpness: v })} />
-            </div>
-
             {/* Palette */}
             <div className="mb-2">
               <div className="text-[10px] text-white/30 mb-2 uppercase tracking-wide">
@@ -1464,6 +1458,7 @@ export default function App() {
 
           {/* ── Filters ── */}
           <Section title="Filters">
+            <FilterSlider label="Sharpness" value={present.sharpness} min={1} max={8} step={0.5} unit="" onChange={v => commit({ ...present, sharpness: v })} />
             <FilterSlider label="Grain" value={present.filters.grain} min={0} max={100} unit="%" onChange={v => updateFilter('grain', v)} />
             <FilterSlider label="Blur" value={present.filters.blur} min={0} max={100} unit="%" onChange={v => updateFilter('blur', v)} />
             <FilterSlider label="Contrast" value={present.filters.contrast} min={100} max={200} unit="%" onChange={v => updateFilter('contrast', v)} />
