@@ -46,6 +46,40 @@ function rgbToHex({ r, g, b }) {
   ).join('')
 }
 
+// Resolves any valid CSS color (hex, rgb(), hsl(), named color, ...) to a hex string
+// by letting the browser's own CSS parser/computed style do the conversion.
+let colorProbeEl = null
+function resolveCssColor(str) {
+  const s = (str || '').trim()
+  if (!s) return null
+  if (!colorProbeEl) {
+    colorProbeEl = document.createElement('div')
+    colorProbeEl.style.display = 'none'
+    document.body.appendChild(colorProbeEl)
+  }
+  colorProbeEl.style.color = ''
+  colorProbeEl.style.color = s
+  if (!colorProbeEl.style.color) return null
+  const m = getComputedStyle(colorProbeEl).color.match(/rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)/)
+  if (!m) return null
+  return rgbToHex({ r: +m[1], g: +m[2], b: +m[3] })
+}
+
+// Extracts every recognizable color (hex, rgb()/hsl()/etc, named) from a pasted string
+function parseColorsFromText(text) {
+  const funcRe = /(?:rgba?|hsla?|hwb|lab|lch|oklch|oklab|color)\([^)]*\)/gi
+  const functional = text.match(funcRe) || []
+  const rest = text.replace(funcRe, ' ')
+  const tokens = rest.split(/[\s,;\n\r\t]+/).map(t => t.trim()).filter(Boolean)
+  const results = []
+  const seen = new Set()
+  for (const t of [...functional, ...tokens]) {
+    const hex = resolveCssColor(t)
+    if (hex && !seen.has(hex)) { seen.add(hex); results.push(hex) }
+  }
+  return results
+}
+
 function loadPalettes() {
   try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}') } catch { return {} }
 }
@@ -288,6 +322,61 @@ function applyMotionBlur(visCtx, offscreen, blurDots = []) {
   visCtx.putImageData(dest, 0, 0)
 }
 
+// ─── WCAG contrast heatmap ───────────────────────────────────────────────────
+
+const CONTRAST_THRESHOLDS = {
+  AA: { normal: 4.5, large: 3 },
+  AAA: { normal: 7, large: 4.5 },
+}
+
+function srgbToLinear(c) {
+  c /= 255
+  return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
+}
+
+// Returns a low-res canvas color-coding each region by which text color (white/black)
+// meets the requested WCAG contrast threshold:
+//   green = both work, blue = white only, amber = black only, red = neither
+function computeContrastHeatmap(srcCanvas, level, size) {
+  const W = srcCanvas.width, H = srcCanvas.height
+  const DS = 6
+  const ow = Math.max(1, Math.ceil(W / DS))
+  const oh = Math.max(1, Math.ceil(H / DS))
+  const src = srcCanvas.getContext('2d').getImageData(0, 0, W, H).data
+  const threshold = CONTRAST_THRESHOLDS[level][size]
+
+  const out = document.createElement('canvas')
+  out.width = ow; out.height = oh
+  const octx = out.getContext('2d')
+  const img = octx.createImageData(ow, oh)
+  const d = img.data
+
+  for (let y = 0; y < oh; y++) {
+    for (let x = 0; x < ow; x++) {
+      const sx = Math.min(W - 1, x * DS)
+      const sy = Math.min(H - 1, y * DS)
+      const si = (sy * W + sx) << 2
+      const L = 0.2126 * srgbToLinear(src[si]) + 0.7152 * srgbToLinear(src[si + 1]) + 0.0722 * srgbToLinear(src[si + 2])
+      const contrastWhite = 1.05 / (L + 0.05)
+      const contrastBlack = (L + 0.05) / 0.05
+      const whiteOk = contrastWhite >= threshold
+      const blackOk = contrastBlack >= threshold
+
+      let r, g, b
+      if (whiteOk && blackOk) { r = 34; g = 197; b = 94 }
+      else if (whiteOk) { r = 59; g = 130; b = 246 }
+      else if (blackOk) { r = 234; g = 179; b = 8 }
+      else { r = 239; g = 68; b = 68 }
+
+      const di = (y * ow + x) << 2
+      d[di] = r; d[di + 1] = g; d[di + 2] = b; d[di + 3] = 255
+    }
+  }
+
+  octx.putImageData(img, 0, 0)
+  return out
+}
+
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
 function IconChevron({ open }) {
@@ -348,6 +437,25 @@ function IconGrid() {
       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
       <rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" />
+    </svg>
+  )
+}
+function IconContrast() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 3a9 9 0 010 18z" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+function IconEyedropper() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11 7l6 6" />
+      <path d="M4 20l3.5-1 8.5-8.5a2.12 2.12 0 000-3L15.5 6a2.12 2.12 0 00-3 0L4 14.5 3 18z" />
+      <path d="M14.5 4.5l3 3" />
     </svg>
   )
 }
@@ -550,6 +658,8 @@ export default function App() {
     warpedRef.current = c
   }
 
+  const contrastRef = useRef(null)
+
   const panDrag = useRef(false)
   const panLast = useRef({ x: 0, y: 0 })
   const dotDrag = useRef(null)
@@ -579,6 +689,9 @@ export default function App() {
   const [savedPalettes, setSavedPalettes] = useState(loadPalettes)
   const [wDraft, setWDraft] = useState(String(CANVAS_W))
   const [hDraft, setHDraft] = useState(String(CANVAS_H))
+  const [contrastCheck, setContrastCheck] = useState(false)
+  const [contrastLevel, setContrastLevel] = useState('AA')
+  const [contrastSize, setContrastSize] = useState('normal')
 
   // ── Canvas render ─────────────────────────────────────────────────────────────
 
@@ -603,7 +716,21 @@ export default function App() {
     applyWarp(warpedCtx, offscreen, present.warp)
     const ctx = canvas.getContext('2d')
     applyMotionBlur(ctx, warped, present.blurDots ?? [])
-  }, [present])
+
+    const contrastCanvas = contrastRef.current
+    if (contrastCanvas) {
+      if (contrastCanvas.width !== cW || contrastCanvas.height !== cH) {
+        contrastCanvas.width = cW; contrastCanvas.height = cH
+      }
+      const cctx = contrastCanvas.getContext('2d')
+      cctx.clearRect(0, 0, cW, cH)
+      if (contrastCheck) {
+        const heat = computeContrastHeatmap(canvas, contrastLevel, contrastSize)
+        cctx.imageSmoothingEnabled = false
+        cctx.drawImage(heat, 0, 0, cW, cH)
+      }
+    }
+  }, [present, contrastCheck, contrastLevel, contrastSize])
 
   // ── Wheel zoom ────────────────────────────────────────────────────────────────
 
@@ -1080,6 +1207,24 @@ export default function App() {
     setActiveColorId(newColor.id)
   }
 
+  function addColors(hexes) {
+    const room = 26 - presentRef.current.colors.length
+    if (room <= 0 || !hexes.length) return
+    const toAdd = hexes.slice(0, room).map(hex => ({ id: uid(), hex }))
+    commit({ ...presentRef.current, colors: [...presentRef.current.colors, ...toAdd] })
+    setActiveColorId(toAdd[toAdd.length - 1].id)
+  }
+
+  async function pickColorWithEyedropper() {
+    if (!window.EyeDropper) return
+    try {
+      const result = await new window.EyeDropper().open()
+      if (result?.sRGBHex) addColors([result.sRGBHex])
+    } catch {
+      // user cancelled
+    }
+  }
+
   function updateColor(id, updated) {
     commit({ ...present, colors: present.colors.map(c => c.id === id ? { ...c, ...updated } : c) })
   }
@@ -1254,6 +1399,24 @@ export default function App() {
     setSavedPalettes({ ...all })
   }
 
+  // ── Paste-to-add color ────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    function onPaste(e) {
+      const active = document.activeElement
+      const isEditable = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)
+      if (isEditable) return
+      const text = e.clipboardData?.getData('text')
+      if (!text) return
+      const hexes = parseColorsFromText(text)
+      if (!hexes.length) return
+      e.preventDefault()
+      addColors(hexes)
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [])
+
   // ── Keyboard ──────────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -1391,10 +1554,19 @@ export default function App() {
                 />
               ))}
               {present.colors.length < 26 && (
-                <button onClick={addColor}
-                  className="w-full mt-1 flex items-center justify-center gap-1.5 py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
-                  <IconPlus /> Add color
-                </button>
+                <div className="mt-1 flex items-stretch gap-1.5">
+                  <button onClick={addColor}
+                    className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
+                    <IconPlus /> Add color
+                  </button>
+                  {window.EyeDropper && (
+                    <button onClick={pickColorWithEyedropper}
+                      title="Pick color from screen"
+                      className="flex items-center justify-center px-2.5 rounded border border-white/[0.08] text-white/35 hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
+                      <IconEyedropper />
+                    </button>
+                  )}
+                </div>
               )}
             </div>
 
@@ -1571,6 +1743,14 @@ export default function App() {
             overflow: 'hidden',
           }}>
             <canvas ref={canvasRef} width={cW} height={cH} style={canvasCSS} />
+
+            {/* Contrast heatmap overlay */}
+            {contrastCheck && (
+              <canvas ref={contrastRef} width={cW} height={cH} style={{
+                position: 'absolute', left: 0, top: 0, width: cW, height: cH,
+                pointerEvents: 'none', mixBlendMode: 'normal',
+              }} />
+            )}
 
             {/* Grain overlay */}
             {present.filters.grain > 0 && (
@@ -2015,6 +2195,73 @@ export default function App() {
             }} />
           )
         })()}
+
+        {/* Contrast heatmap toggle */}
+        <div className="absolute bottom-4 left-4 flex flex-col items-start gap-1.5" style={{ pointerEvents: 'auto' }}>
+          {contrastCheck && (
+            <div className="flex items-center gap-2.5 text-[10px]" style={{
+              background: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(6px)',
+              border: '1px solid rgba(255,255,255,0.07)', borderRadius: 6, padding: '4px 8px',
+              color: 'rgba(255,255,255,0.45)',
+            }}>
+              {[
+                ['rgb(34,197,94)', 'Both OK'],
+                ['rgb(59,130,246)', 'White OK'],
+                ['rgb(234,179,8)', 'Black OK'],
+                ['rgb(239,68,68)', 'Neither OK'],
+              ].map(([color, label]) => (
+                <span key={label} className="flex items-center gap-1">
+                  <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block', flexShrink: 0 }} />
+                  {label}
+                </span>
+              ))}
+            </div>
+          )}
+
+          <div className="flex items-center gap-1.5">
+            <button
+              data-no-pan=""
+              onClick={() => setContrastCheck(c => !c)}
+              title="WCAG contrast heatmap"
+              className="flex items-center justify-center select-none"
+              style={{
+                width: 28, height: 28, borderRadius: 6,
+                color: contrastCheck ? 'rgba(196,181,253,1)' : 'rgba(255,255,255,0.35)',
+                background: contrastCheck ? 'rgba(139,92,246,0.28)' : 'rgba(0,0,0,0.45)',
+                backdropFilter: 'blur(6px)',
+                border: contrastCheck ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.07)',
+                cursor: 'pointer',
+              }}
+            >
+              <IconContrast />
+            </button>
+
+            {contrastCheck && (
+              <div className="flex items-center gap-1 text-[10px]" style={{
+                background: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(6px)',
+                border: '1px solid rgba(255,255,255,0.07)', borderRadius: 6, padding: '3px 4px',
+              }}>
+                {['AA', 'AAA'].map(lvl => (
+                  <button key={lvl} data-no-pan="" onClick={() => setContrastLevel(lvl)} style={{
+                    padding: '2px 6px', borderRadius: 4,
+                    background: contrastLevel === lvl ? 'rgba(139,92,246,0.28)' : 'transparent',
+                    color: contrastLevel === lvl ? 'rgba(196,181,253,1)' : 'rgba(255,255,255,0.4)',
+                    cursor: 'pointer',
+                  }}>{lvl}</button>
+                ))}
+                <div style={{ width: 1, height: 12, background: 'rgba(255,255,255,0.1)', margin: '0 2px' }} />
+                {[['normal', 'Normal'], ['large', 'Large']].map(([key, label]) => (
+                  <button key={key} data-no-pan="" onClick={() => setContrastSize(key)} style={{
+                    padding: '2px 6px', borderRadius: 4,
+                    background: contrastSize === key ? 'rgba(139,92,246,0.28)' : 'transparent',
+                    color: contrastSize === key ? 'rgba(196,181,253,1)' : 'rgba(255,255,255,0.4)',
+                    cursor: 'pointer',
+                  }}>{label}</button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
 
         {/* Zoom badge */}
         <button
