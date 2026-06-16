@@ -2342,23 +2342,81 @@ export default function App() {
             )}
           </div>
 
-          {/* Canvas hint */}
-          <div style={{
-            transform: `scale(${1 / view.zoom})`,
-            transformOrigin: 'top center',
-            marginTop: 14 / view.zoom,
-            pointerEvents: 'none',
-            display: 'flex',
-            gap: 16,
-            color: 'rgba(255,255,255,0.2)',
-            fontSize: 11,
-            fontVariantNumeric: 'tabular-nums',
-            userSelect: 'none',
-            letterSpacing: '0.01em',
-          }}>
-            <span>Hold <b style={{ fontWeight: 500, color: 'rgba(255,255,255,0.32)' }}>Space</b> to pan</span>
-            <span><b style={{ fontWeight: 500, color: 'rgba(255,255,255,0.32)' }}>⌘+</b> / <b style={{ fontWeight: 500, color: 'rgba(255,255,255,0.32)' }}>⌘−</b> to zoom</span>
-          </div>
+          {/* Canvas hint (hidden when contrast is active) */}
+          {!contrastCheck && (
+            <div style={{
+              transform: `scale(${1 / view.zoom})`,
+              transformOrigin: 'top center',
+              marginTop: 14 / view.zoom,
+              pointerEvents: 'none',
+              display: 'flex',
+              gap: 16,
+              color: 'rgba(255,255,255,0.2)',
+              fontSize: 11,
+              fontVariantNumeric: 'tabular-nums',
+              userSelect: 'none',
+              letterSpacing: '0.01em',
+            }}>
+              <span>Hold <b style={{ fontWeight: 500, color: 'rgba(255,255,255,0.32)' }}>Space</b> to pan</span>
+              <span><b style={{ fontWeight: 500, color: 'rgba(255,255,255,0.32)' }}>⌘+</b> / <b style={{ fontWeight: 500, color: 'rgba(255,255,255,0.32)' }}>⌘−</b> to zoom</span>
+            </div>
+          )}
+
+          {/* Contrast controls + legend below canvas */}
+          {contrastCheck && (
+            <div style={{
+              transform: `scale(${1 / view.zoom})`,
+              transformOrigin: 'top center',
+              marginTop: 10 / view.zoom,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 2,
+                background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(10px)',
+                border: '1px solid rgba(255,255,255,0.09)', borderRadius: 6, padding: '3px 4px',
+                fontSize: 11,
+              }}>
+                {['AA', 'AAA'].map(lvl => (
+                  <button key={lvl} data-no-pan="" onClick={() => setContrastLevel(lvl)} style={{
+                    padding: '2px 6px', borderRadius: 4, border: 'none',
+                    background: contrastLevel === lvl ? 'rgba(139,92,246,0.28)' : 'transparent',
+                    color: contrastLevel === lvl ? 'rgba(196,181,253,1)' : 'rgba(255,255,255,0.4)',
+                    cursor: 'pointer',
+                  }}>{lvl}</button>
+                ))}
+                <div style={{ width: 1, height: 12, background: 'rgba(255,255,255,0.1)', margin: '0 2px' }} />
+                {[['normal', 'Normal'], ['large', 'Large']].map(([key, label]) => (
+                  <button key={key} data-no-pan="" onClick={() => setContrastSize(key)} style={{
+                    padding: '2px 6px', borderRadius: 4, border: 'none',
+                    background: contrastSize === key ? 'rgba(139,92,246,0.28)' : 'transparent',
+                    color: contrastSize === key ? 'rgba(196,181,253,1)' : 'rgba(255,255,255,0.4)',
+                    cursor: 'pointer',
+                  }}>{label}</button>
+                ))}
+              </div>
+              <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.08)', flexShrink: 0 }} />
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(10px)',
+                border: '1px solid rgba(255,255,255,0.09)', borderRadius: 6, padding: '4px 8px',
+                fontSize: 11, color: 'rgba(255,255,255,0.45)',
+              }}>
+                {[
+                  ['rgb(34,197,94)', 'Both OK'],
+                  ['rgb(59,130,246)', 'White OK'],
+                  ['rgb(234,179,8)', 'Black OK'],
+                  ['rgb(239,68,68)', 'Neither OK'],
+                ].map(([color, label]) => (
+                  <span key={label} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block', flexShrink: 0 }} />
+                    {label}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           </div>
         </div>
 
@@ -2600,72 +2658,24 @@ export default function App() {
           {Math.round(view.zoom * 100)}%
         </button>
 
-        {/* Contrast heatmap toggle */}
-        <div data-tour="contrast-toggle" className="absolute top-4 left-4 flex flex-col items-start gap-1.5" style={{ pointerEvents: 'auto' }}>
-          <div className="flex items-center gap-1.5">
-            <button
-              data-no-pan=""
-              onClick={() => setContrastCheck(c => !c)}
-              title="WCAG contrast heatmap"
-              className="flex items-center justify-center select-none"
-              style={{
-                width: 28, height: 28, borderRadius: 6,
-                color: contrastCheck ? 'rgba(196,181,253,1)' : 'rgba(255,255,255,0.35)',
-                background: contrastCheck ? 'rgba(139,92,246,0.28)' : 'rgba(0,0,0,0.45)',
-                backdropFilter: 'blur(6px)',
-                border: contrastCheck ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.07)',
-                cursor: 'pointer',
-              }}
-            >
-              <Contrast size={13} />
-            </button>
-
-            {contrastCheck && (
-              <div className="flex items-center gap-1 text-[10px]" style={{
-                background: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(6px)',
-                border: '1px solid rgba(255,255,255,0.07)', borderRadius: 6, padding: '3px 4px',
-              }}>
-                {['AA', 'AAA'].map(lvl => (
-                  <button key={lvl} data-no-pan="" onClick={() => setContrastLevel(lvl)} style={{
-                    padding: '2px 6px', borderRadius: 4,
-                    background: contrastLevel === lvl ? 'rgba(139,92,246,0.28)' : 'transparent',
-                    color: contrastLevel === lvl ? 'rgba(196,181,253,1)' : 'rgba(255,255,255,0.4)',
-                    cursor: 'pointer',
-                  }}>{lvl}</button>
-                ))}
-                <div style={{ width: 1, height: 12, background: 'rgba(255,255,255,0.1)', margin: '0 2px' }} />
-                {[['normal', 'Normal'], ['large', 'Large']].map(([key, label]) => (
-                  <button key={key} data-no-pan="" onClick={() => setContrastSize(key)} style={{
-                    padding: '2px 6px', borderRadius: 4,
-                    background: contrastSize === key ? 'rgba(139,92,246,0.28)' : 'transparent',
-                    color: contrastSize === key ? 'rgba(196,181,253,1)' : 'rgba(255,255,255,0.4)',
-                    cursor: 'pointer',
-                  }}>{label}</button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {contrastCheck && (
-            <div className="flex items-center gap-2.5 text-[10px]" style={{
-              background: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(6px)',
-              border: '1px solid rgba(255,255,255,0.07)', borderRadius: 6, padding: '4px 8px',
-              color: 'rgba(255,255,255,0.45)',
-            }}>
-              {[
-                ['rgb(34,197,94)', 'Both OK'],
-                ['rgb(59,130,246)', 'White OK'],
-                ['rgb(234,179,8)', 'Black OK'],
-                ['rgb(239,68,68)', 'Neither OK'],
-              ].map(([color, label]) => (
-                <span key={label} className="flex items-center gap-1">
-                  <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block', flexShrink: 0 }} />
-                  {label}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
+        {/* Contrast toggle — top-left */}
+        <button
+          data-tour="contrast-toggle"
+          data-no-pan=""
+          onClick={() => setContrastCheck(c => !c)}
+          title="WCAG contrast heatmap"
+          className="absolute top-3 left-3 z-20 flex items-center justify-center select-none"
+          style={{
+            width: 28, height: 28, borderRadius: 6,
+            color: contrastCheck ? 'rgba(196,181,253,1)' : 'rgba(255,255,255,0.35)',
+            background: contrastCheck ? 'rgba(139,92,246,0.28)' : 'rgba(0,0,0,0.55)',
+            backdropFilter: 'blur(10px)',
+            border: contrastCheck ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.09)',
+            cursor: 'pointer',
+          }}
+        >
+          <Contrast size={13} />
+        </button>
       </main>
 
     </div>
