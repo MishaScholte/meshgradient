@@ -1,4 +1,10 @@
 import { useState, useRef, useEffect, useLayoutEffect } from 'react'
+import {
+  ChevronDown, Undo2, Redo2, Trash2, Plus, Shuffle, Contrast, Pipette,
+  Import, FileBraces, MoreHorizontal, Copy, Check, ImageDown, HelpCircle,
+} from 'lucide-react'
+import { driver } from 'driver.js'
+import 'driver.js/dist/driver.css'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -20,6 +26,12 @@ const MIN_RADIUS = 20
 const ROT_HANDLE_OFFSET = 28
 const COLOR_DEFAULTS = ['#ff6b6b', '#4fc3f7', '#a29bfe', '#fdcb6e', '#55efc4', '#fd79a8', '#e17055', '#74b9ff']
 const LABELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+const THUMB_W = 64
+const THUMB_H = Math.round(THUMB_W * CANVAS_H / CANVAS_W)
+const DOCS_LS_KEY = 'hazy-documents'
+const DOC_SAVE_DEBOUNCE = 600
+const THUMB_DEBOUNCE = 400
+const DEFAULT_DOC_NAME = 'Untitled'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -84,6 +96,42 @@ function loadPalettes() {
   try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}') } catch { return {} }
 }
 function writePalettes(p) { localStorage.setItem(LS_KEY, JSON.stringify(p)) }
+
+// Checks whether an object has the shape of a Hazy document (colors/dots/background/size/warp/filters)
+function isValidDocShape(doc) {
+  return !!doc && typeof doc === 'object'
+    && Array.isArray(doc.colors)
+    && Array.isArray(doc.dots)
+    && doc.background && typeof doc.background === 'object'
+    && doc.size && typeof doc.size === 'object'
+    && doc.warp && typeof doc.warp === 'object'
+    && doc.filters && typeof doc.filters === 'object'
+}
+
+function isValidDocEntry(entry) {
+  return !!entry && typeof entry === 'object'
+    && typeof entry.id === 'string'
+    && typeof entry.name === 'string'
+    && isValidDocShape(entry.doc)
+}
+
+// Creates a brand-new document from the initial template, with fresh ids so colors/dots
+// don't share references or ids with INIT_DOC or other documents.
+function freshDoc() {
+  const idMap = new Map()
+  const colors = INIT_COLORS.map(c => {
+    const id = uid()
+    idMap.set(c.id, id)
+    return { ...c, id }
+  })
+  const dots = INIT_DOTS.map(d => ({ ...d, id: uid(), colorId: idMap.get(d.colorId) }))
+  return {
+    ...structuredClone(INIT_DOC),
+    colors,
+    dots,
+    warp: structuredClone(INIT_WARP),
+  }
+}
 
 
 function buildCSSFilter({ blur, contrast, brightness, saturation, hue }) {
@@ -377,100 +425,19 @@ function computeContrastHeatmap(srcCanvas, level, size) {
   return out
 }
 
-// ─── Icons ────────────────────────────────────────────────────────────────────
-
-function IconChevron({ open }) {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
-      style={{ transition: 'transform 0.18s ease', transform: open ? 'rotate(180deg)' : 'rotate(0deg)' }}>
-      <polyline points="6 9 12 15 18 9" />
-    </svg>
-  )
-}
-function IconUndo() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 7v6h6" /><path d="M3 13C5.4 7.8 11 4 17 5.3A9 9 0 0121 13" />
-    </svg>
-  )
-}
-function IconRedo() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M21 7v6h-6" /><path d="M21 13C18.6 7.8 13 4 7 5.3A9 9 0 003 13" />
-    </svg>
-  )
-}
-function IconTrash() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14H6L5 6" />
-      <path d="M10 11v6M14 11v6" /><path d="M9 6V4h6v2" />
-    </svg>
-  )
-}
-function IconPlus() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-      <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-    </svg>
-  )
-}
-function IconShuffle() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="16 3 21 3 21 8" /><line x1="4" y1="20" x2="21" y2="3" />
-      <polyline points="21 16 21 21 16 21" /><line x1="15" y1="15" x2="21" y2="21" />
-      <line x1="4" y1="4" x2="9" y2="9" />
-    </svg>
-  )
-}
-function IconGrid() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
-      <rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" />
-    </svg>
-  )
-}
-function IconContrast() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 3a9 9 0 010 18z" fill="currentColor" stroke="none" />
-    </svg>
-  )
-}
-function IconEyedropper() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M11 7l6 6" />
-      <path d="M4 20l3.5-1 8.5-8.5a2.12 2.12 0 000-3L15.5 6a2.12 2.12 0 00-3 0L4 14.5 3 18z" />
-      <path d="M14.5 4.5l3 3" />
-    </svg>
-  )
-}
 
 // ─── Section ──────────────────────────────────────────────────────────────────
 
-function Section({ title, defaultOpen = false, children }) {
+function Section({ title, defaultOpen = false, tourId, children }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <div className="border-b border-white/[0.07]">
+    <div className="border-b border-white/[0.07]" data-tour={tourId}>
       <button
         onClick={() => setOpen(o => !o)}
         className="flex w-full items-center justify-between px-4 py-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-white/35 hover:text-white/60 hover:bg-white/[0.04] transition-colors select-none"
       >
-        {title}<IconChevron open={open} />
+        {title}<ChevronDown size={13} strokeWidth={2.5}
+          style={{ transition: 'transform 0.18s ease', transform: open ? 'rotate(180deg)' : 'rotate(0deg)' }} />
       </button>
       <div style={{
         overflow: 'hidden',
@@ -565,8 +532,69 @@ function ColorRow({ label, color, isActive, onActivate, onChange, onDelete }) {
         onClick={e => { e.stopPropagation(); onDelete() }}
         className="text-white/20 hover:text-red-400 transition-colors shrink-0"
       >
-        <IconTrash />
+        <Trash2 size={11} />
       </button>
+    </div>
+  )
+}
+
+
+// ─── FileRailItem ─────────────────────────────────────────────────────────────
+
+function FileRailItem({ entry, isActive, onSelect, onRename, canDelete, onDelete }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(entry.name)
+  const inputRef = useRef(null)
+
+  useEffect(() => {
+    if (editing) {
+      setDraft(entry.name)
+      requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.select() })
+    }
+  }, [editing])
+
+  function commit() {
+    setEditing(false)
+    onRename(draft)
+  }
+
+  return (
+    <div className="relative w-full group shrink-0">
+      <button
+        onClick={onSelect}
+        onDoubleClick={() => setEditing(true)}
+        title={entry.name}
+        className={`w-full aspect-[8/5] rounded overflow-hidden border-2 transition-colors ${
+          isActive ? 'border-white' : 'border-white/10 hover:border-white/30'
+        }`}
+        style={{ background: '#1c1c1c' }}
+      >
+        {entry.thumbnail
+          ? <img src={entry.thumbnail} alt={entry.name} className="w-full h-full object-cover" />
+          : <div className="w-full h-full" />}
+      </button>
+      {canDelete && (
+        <button
+          onClick={e => { e.stopPropagation(); onDelete() }}
+          title="Delete"
+          className="absolute -top-1.5 -right-1.5 hidden group-hover:flex items-center justify-center w-4 h-4 rounded-full bg-[#222] border border-white/15 text-white/50 hover:text-red-400 hover:border-red-400/40 transition-colors"
+        >
+          <Trash2 size={11} />
+        </button>
+      )}
+      {editing && (
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={e => {
+            if (e.key === 'Enter') commit()
+            else if (e.key === 'Escape') setEditing(false)
+          }}
+          className="absolute left-0 top-full mt-0.5 w-full z-10 text-[9px] text-center bg-[#0d0d0d] border border-white/20 rounded px-0.5 py-0.5 outline-none focus:border-white/40 text-white/80"
+        />
+      )}
     </div>
   )
 }
@@ -593,12 +621,26 @@ function FilterSlider({ label, value, min, max, step = 1, unit, onChange }) {
 
 export default function App() {
 
+  // ── Documents ────────────────────────────────────────────────────────────────
+
+  const [documents, setDocuments] = useState(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(DOCS_LS_KEY) || 'null')
+      if (Array.isArray(raw) && raw.length && raw.every(isValidDocEntry)) {
+        return raw.map(d => ({ ...d, past: [], future: [], thumbnail: d.thumbnail ?? null }))
+      }
+    } catch {}
+    return [{ id: uid(), name: DEFAULT_DOC_NAME, doc: INIT_DOC, past: [], future: [], thumbnail: null }]
+  })
+  const [activeDocId, setActiveDocId] = useState(documents[0].id)
+  const activeDoc = documents.find(d => d.id === activeDocId) ?? documents[0]
+
   // ── History ─────────────────────────────────────────────────────────────────
 
-  const [past, setPast] = useState([])
-  const [present, _setPresent] = useState(INIT_DOC)
-  const [future, setFuture] = useState([])
-  const presentRef = useRef(INIT_DOC)
+  const [past, setPast] = useState(activeDoc.past ?? [])
+  const [present, _setPresent] = useState(activeDoc.doc)
+  const [future, setFuture] = useState(activeDoc.future ?? [])
+  const presentRef = useRef(activeDoc.doc)
 
   function syncPresent(doc) { presentRef.current = doc; _setPresent(doc) }
   function commit(doc) {
@@ -659,6 +701,10 @@ export default function App() {
   }
 
   const contrastRef = useRef(null)
+  const importInputRef = useRef(null)
+  const fileMenuRef = useRef(null)
+  const [fileMenuOpen, setFileMenuOpen] = useState(false)
+  const [copiedPNG, setCopiedPNG] = useState(false)
 
   const panDrag = useRef(false)
   const panLast = useRef({ x: 0, y: 0 })
@@ -675,7 +721,7 @@ export default function App() {
   // ── UI state ─────────────────────────────────────────────────────────────────
 
   const [mode, setMode] = useState('compose')
-  const [activeColorId, setActiveColorId] = useState(INIT_COLORS[0].id)
+  const [activeColorId, setActiveColorId] = useState(activeDoc.doc.colors[0]?.id ?? null)
   const [selectedDotIds, _setSelectedDotIds] = useState(() => new Set())
   const selectedDotIdsRef = useRef(new Set())
   function setSelectedDotIds(val) {
@@ -692,6 +738,74 @@ export default function App() {
   const [contrastCheck, setContrastCheck] = useState(false)
   const [contrastLevel, setContrastLevel] = useState('AA')
   const [contrastSize, setContrastSize] = useState('normal')
+
+  // ── Document operations ────────────────────────────────────────────────────────
+
+  function resetDocUIState(doc) {
+    setSelectedDotIds(new Set())
+    setSelectedWarpDotId(null)
+    setSelectedBlurDotId(null)
+    setActiveColorId(doc.colors[0]?.id ?? null)
+    setMode('compose')
+    setView({ zoom: 1, pan: { x: 0, y: 0 } })
+  }
+
+  function switchDocument(targetId) {
+    if (targetId === activeDocId) return
+    const target = documents.find(d => d.id === targetId)
+    if (!target) return
+    const currentDoc = presentRef.current
+    setDocuments(docs => docs.map(d => d.id === activeDocId
+      ? { ...d, doc: currentDoc, past, future }
+      : d))
+    setPast(target.past ?? [])
+    setFuture(target.future ?? [])
+    syncPresent(target.doc)
+    setActiveDocId(targetId)
+    resetDocUIState(target.doc)
+  }
+
+  function addDocument() {
+    const currentDoc = presentRef.current
+    const newDoc = freshDoc()
+    const newEntry = { id: uid(), name: DEFAULT_DOC_NAME, doc: newDoc, past: [], future: [], thumbnail: null }
+    setDocuments(docs => [
+      ...docs.map(d => d.id === activeDocId
+        ? { ...d, doc: currentDoc, past, future }
+        : d),
+      newEntry,
+    ])
+    setPast([])
+    setFuture([])
+    syncPresent(newDoc)
+    setActiveDocId(newEntry.id)
+    resetDocUIState(newDoc)
+  }
+
+  function deleteDocument(id) {
+    if (documents.length <= 1) return
+    const target = documents.find(d => d.id === id)
+    if (!target) return
+    if (!window.confirm(`Delete "${target.name}"?`)) return
+    if (id === activeDocId) {
+      const idx = documents.findIndex(d => d.id === id)
+      const neighbor = documents[idx - 1] ?? documents[idx + 1]
+      setDocuments(docs => docs.filter(d => d.id !== id))
+      setPast(neighbor.past ?? [])
+      setFuture(neighbor.future ?? [])
+      syncPresent(neighbor.doc)
+      setActiveDocId(neighbor.id)
+      resetDocUIState(neighbor.doc)
+    } else {
+      setDocuments(docs => docs.filter(d => d.id !== id))
+    }
+  }
+
+  function renameDocument(id, name) {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    setDocuments(docs => docs.map(d => d.id === id ? { ...d, name: trimmed } : d))
+  }
 
   // ── Canvas render ─────────────────────────────────────────────────────────────
 
@@ -731,6 +845,41 @@ export default function App() {
       }
     }
   }, [present, contrastCheck, contrastLevel, contrastSize])
+
+  // ── Thumbnail capture ────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    const id = setTimeout(() => {
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const thumb = document.createElement('canvas')
+      thumb.width = THUMB_W
+      thumb.height = THUMB_H
+      thumb.getContext('2d').drawImage(canvas, 0, 0, THUMB_W, THUMB_H)
+      const dataUrl = thumb.toDataURL('image/png')
+      setDocuments(docs => docs.map(d => d.id === activeDocId ? { ...d, thumbnail: dataUrl } : d))
+    }, THUMB_DEBOUNCE)
+    return () => clearTimeout(id)
+  }, [present, activeDocId])
+
+  // ── Document persistence ─────────────────────────────────────────────────────
+
+  useEffect(() => {
+    const id = setTimeout(() => {
+      const toSave = documents.map(d => ({
+        id: d.id,
+        name: d.name,
+        doc: d.id === activeDocId ? presentRef.current : d.doc,
+        thumbnail: d.thumbnail ?? null,
+      }))
+      try {
+        localStorage.setItem(DOCS_LS_KEY, JSON.stringify(toSave))
+      } catch (err) {
+        console.warn('Failed to save documents to localStorage', err)
+      }
+    }, DOC_SAVE_DEBOUNCE)
+    return () => clearTimeout(id)
+  }, [documents, present, activeDocId])
 
   // ── Wheel zoom ────────────────────────────────────────────────────────────────
 
@@ -1341,6 +1490,55 @@ export default function App() {
     })
   }
 
+  function startTutorial() {
+    driver({
+      showProgress: true,
+      animate: true,
+      overlayOpacity: 0.6,
+      popoverClass: 'hazy-driver-popover',
+      steps: [
+        {
+          popover: {
+            title: 'Welcome to Hazy',
+            description: 'A quick tour of the key features. You can restart this tour at any time via the "Tutorial" button.',
+          },
+        },
+        {
+          element: '[data-tour="canvas"]',
+          popover: {
+            title: 'Canvas',
+            description: 'Double-click to add a new point. Hold Shift to select multiple points. Hold Space and drag to pan. In Warp and Blur mode you can resize the circle and drag the yellow center point to control the intensity of the effect.',
+            side: 'left',
+          },
+        },
+        {
+          element: '[data-tour="colors-section"]',
+          popover: {
+            title: 'Colors',
+            description: 'Quickly add colors by pasting one or more hex values directly from your clipboard (⌘V).',
+            side: 'right',
+          },
+        },
+        {
+          element: '[data-tour="mode-switcher"]',
+          popover: {
+            title: 'Compose / Warp / Blur',
+            description: 'Switch between the three modes: place color points (Compose), distort the gradient (Warp), or apply local blur (Blur).',
+            side: 'bottom',
+          },
+        },
+        {
+          element: '[data-tour="contrast-toggle"]',
+          popover: {
+            title: 'Contrast check',
+            description: 'Show a WCAG contrast heatmap to see where white or black text is readable on your gradient (AA/AAA, normal or large text).',
+            side: 'bottom',
+          },
+        },
+      ],
+    }).drive()
+  }
+
   function exportPNG() {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -1348,6 +1546,68 @@ export default function App() {
     link.download = 'hazy-gradient.png'
     link.href = canvas.toDataURL('image/png')
     link.click()
+  }
+
+  async function copyPNG() {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    canvas.toBlob(async blob => {
+      if (!blob) return
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+        setCopiedPNG(true)
+        setTimeout(() => setCopiedPNG(false), 1500)
+      } catch (err) {
+        console.warn('Failed to copy image to clipboard', err)
+        alert('Could not copy image to clipboard.')
+      }
+    }, 'image/png')
+  }
+
+  function exportDocumentJSON() {
+    const name = activeDoc.name || 'hazy-gradient'
+    const payload = { hazyDoc: 1, name, doc: presentRef.current }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    const safeName = name.trim().replace(/[^a-z0-9-_ ]/gi, '').trim() || 'hazy-gradient'
+    link.download = `${safeName}.json`
+    link.href = url
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function importDocumentJSON(file) {
+    const reader = new FileReader()
+    reader.onload = () => {
+      let parsed
+      try {
+        parsed = JSON.parse(reader.result)
+      } catch {
+        alert('Could not read file — not valid JSON.')
+        return
+      }
+      const doc = isValidDocShape(parsed) ? parsed : parsed?.doc
+      if (!isValidDocShape(doc)) {
+        alert('Invalid Hazy document file.')
+        return
+      }
+      const newEntry = { id: uid(), name: parsed.name ?? 'Imported', doc, past: [], future: [], thumbnail: null }
+      const currentDoc = presentRef.current
+      setDocuments(docs => [
+        ...docs.map(d => d.id === activeDocId
+          ? { ...d, doc: currentDoc, past, future }
+          : d),
+        newEntry,
+      ])
+      setPast([])
+      setFuture([])
+      syncPresent(doc)
+      setActiveDocId(newEntry.id)
+      resetDocUIState(doc)
+    }
+    reader.onerror = () => alert('Could not read file — not valid JSON.')
+    reader.readAsText(file)
   }
 
   // ── Warp operations ───────────────────────────────────────────────────────────
@@ -1484,6 +1744,15 @@ export default function App() {
   useEffect(() => setBgHexDraft(present.background.hex), [present.background.hex])
   useEffect(() => { setWDraft(String(cW)); setHDraft(String(cH)) }, [cW, cH])
 
+  useEffect(() => {
+    if (!fileMenuOpen) return
+    function onPointerDown(e) {
+      if (!fileMenuRef.current?.contains(e.target)) setFileMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    return () => document.removeEventListener('mousedown', onPointerDown)
+  }, [fileMenuOpen])
+
   function commitBgHex(val) {
     const c = /^#/.test(val) ? val : '#' + val
     if (/^#[0-9a-fA-F]{6}$/.test(c)) updateBackground({ ...present.background, hex: c.toLowerCase() })
@@ -1495,21 +1764,59 @@ export default function App() {
   return (
     <div className="flex h-screen overflow-hidden bg-[#111]">
 
+      <div className="flex flex-col shrink-0">
+
+      {/* ── Header ──────────────────────────────────────────────────────── */}
+      <div className="h-12 flex items-center justify-between px-5 border-b border-white/[0.07] shrink-0 bg-[#181818]">
+        <span className="text-white text-[17px] font-semibold tracking-tight">Hazy</span>
+        <button onClick={startTutorial}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium text-white/45 border border-white/[0.08] hover:text-white/80 hover:border-white/20 hover:bg-white/[0.06] transition-colors">
+          <HelpCircle size={12} /> Tutorial
+        </button>
+        <input
+          ref={importInputRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={e => {
+            const file = e.target.files?.[0]
+            if (file) importDocumentJSON(file)
+            e.target.value = ''
+          }}
+        />
+      </div>
+
+      <div className="flex flex-1 overflow-hidden">
+
+      {/* ── File rail ───────────────────────────────────────────────────── */}
+      <aside data-tour="file-rail" className="w-24 shrink-0 flex flex-col items-center bg-[#0d0d0d] border-r border-white/[0.07] px-4 py-2 gap-1.5 overflow-y-auto">
+        {documents.map(entry => (
+          <FileRailItem
+            key={entry.id}
+            entry={entry}
+            isActive={entry.id === activeDocId}
+            onSelect={() => switchDocument(entry.id)}
+            onRename={name => renameDocument(entry.id, name)}
+            canDelete={documents.length > 1}
+            onDelete={() => deleteDocument(entry.id)}
+          />
+        ))}
+        <button
+          onClick={addDocument}
+          title="Add gradient"
+          className="w-full aspect-[8/5] shrink-0 rounded border border-dashed border-white/15 text-white/30 hover:text-white/60 hover:border-white/30 flex items-center justify-center transition-colors"
+        >
+          <Plus size={12} strokeWidth={2.5} />
+        </button>
+      </aside>
+
       {/* ── Sidebar ─────────────────────────────────────────────────────── */}
       <aside className="w-80 shrink-0 flex flex-col bg-[#181818] border-r border-white/[0.07]">
-
-        <div className="h-12 flex items-center justify-between px-5 border-b border-white/[0.07] shrink-0">
-          <span className="text-white text-[17px] font-semibold tracking-tight">Hazy</span>
-          <button onClick={exportPNG}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium text-white/45 border border-white/[0.08] hover:text-white/80 hover:border-white/20 hover:bg-white/[0.06] transition-colors">
-            Export PNG
-          </button>
-        </div>
 
         <nav className="flex-1 overflow-y-auto min-h-0">
 
           {/* ── Colors ── */}
-          <Section title="Colors" defaultOpen>
+          <Section title="Colors" defaultOpen tourId="colors-section">
 
             {/* Background */}
             <div className="mb-3 pb-3 border-b border-white/[0.06]">
@@ -1557,13 +1864,13 @@ export default function App() {
                 <div className="mt-1 flex items-stretch gap-1.5">
                   <button onClick={addColor}
                     className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
-                    <IconPlus /> Add color
+                    <Plus size={12} strokeWidth={2.5} /> Add color
                   </button>
                   {window.EyeDropper && (
                     <button onClick={pickColorWithEyedropper}
                       title="Pick color from screen"
                       className="flex items-center justify-center px-2.5 rounded border border-white/[0.08] text-white/35 hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
-                      <IconEyedropper />
+                      <Pipette size={12} />
                     </button>
                   )}
                 </div>
@@ -1575,7 +1882,7 @@ export default function App() {
             <div className="mt-3 pt-3 border-t border-white/[0.06]">
               <button onClick={randomizeColors}
                 className="w-full mb-3 flex items-center justify-center gap-1.5 py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
-                <IconShuffle /> Randomize colors
+                <Shuffle size={12} /> Randomize colors
               </button>
               <div className="flex gap-1.5 mb-2">
                 <input value={paletteName} onChange={e => setPaletteName(e.target.value)}
@@ -1599,7 +1906,7 @@ export default function App() {
                       <button
                         onClick={() => deletePalette(n)}
                         className="shrink-0 p-1 rounded text-white/20 hover:text-red-400 hover:bg-white/[0.05] transition-colors opacity-0 group-hover:opacity-100">
-                        <IconTrash />
+                        <Trash2 size={11} />
                       </button>
                     </div>
                   ))}
@@ -1609,7 +1916,7 @@ export default function App() {
           </Section>
 
           {/* ── Warp ── */}
-          <Section title="Warp">
+          <Section title="Warp" tourId="warp-section">
             <p className="text-[10px] text-white/25 leading-relaxed mb-3">
               Switch to Warp mode and double-click to place dots. Drag the yellow handle to set direction and strength.
             </p>
@@ -1629,7 +1936,7 @@ export default function App() {
           </Section>
 
           {/* ── Filters ── */}
-          <Section title="Filters">
+          <Section title="Filters" tourId="filters-section">
             <FilterSlider label="Sharpness" value={present.sharpness} min={1} max={8} step={0.5} unit="" onChange={v => commit({ ...present, sharpness: v })} />
             <FilterSlider label="Grain" value={present.filters.grain} min={0} max={100} unit="%" onChange={v => updateFilter('grain', v)} />
             <FilterSlider label="Blur" value={present.filters.blur} min={0} max={100} unit="%" onChange={v => updateFilter('blur', v)} />
@@ -1644,7 +1951,7 @@ export default function App() {
           </Section>
 
           {/* ── Size ── */}
-          <Section title="Size">
+          <Section title="Size" tourId="size-section">
             <div className="flex gap-3">
               {[['W', wDraft, setWDraft, v => setSize(v, cH)], ['H', hDraft, setHDraft, v => setSize(cW, v)]].map(([label, draft, setDraft, commit]) => (
                 <div key={label} className="flex-1">
@@ -1668,22 +1975,16 @@ export default function App() {
         </nav>
 
         {/* Undo / Redo */}
-        <div className="shrink-0 p-3 border-t border-white/[0.07] flex gap-2">
-          <button onClick={undo} disabled={!canUndo}
-            className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-medium transition-colors disabled:opacity-20 disabled:cursor-not-allowed text-white/40 enabled:hover:text-white/70 enabled:hover:bg-white/[0.06]">
-            <IconUndo /> Undo
-          </button>
-          <div className="w-px bg-white/[0.07]" />
-          <button onClick={redo} disabled={!canRedo}
-            className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-medium transition-colors disabled:opacity-20 disabled:cursor-not-allowed text-white/40 enabled:hover:text-white/70 enabled:hover:bg-white/[0.06]">
-            Redo <IconRedo />
-          </button>
-        </div>
       </aside>
+
+      </div>
+
+      </div>
 
       {/* ── Canvas area ──────────────────────────────────────────────────── */}
       <main
         ref={mainRef}
+        data-tour="canvas"
         className="flex-1 relative overflow-hidden"
         style={{ cursor: spaceDown ? 'grab' : mode !== 'compose' || activeColorId ? 'crosshair' : 'default' }}
         onPointerDown={onMainPointerDown}
@@ -1695,7 +1996,7 @@ export default function App() {
         onTouchMove={onTouchMove}
       >
         {/* Mode switcher */}
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 select-none" data-no-pan="">
+        <div data-tour="mode-switcher" className="absolute top-3 left-1/2 -translate-x-1/2 z-20 select-none" data-no-pan="">
           <div style={{
             display: 'flex', gap: 2, padding: 3,
             background: 'rgba(0,0,0,0.55)',
@@ -1731,6 +2032,68 @@ export default function App() {
           </div>
         </div>
 
+        {/* Export buttons */}
+        <div data-tour="export-buttons" className="absolute top-3 right-3 z-20 flex items-center gap-1.5 select-none" data-no-pan="">
+          <div className="flex items-center" style={{
+            height: 28, background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(10px)',
+            border: '1px solid rgba(255,255,255,0.09)', borderRadius: 6,
+          }}>
+            <button onClick={undo} disabled={!canUndo} data-no-pan=""
+              title="Undo (⌘Z)"
+              className="flex items-center justify-center px-2 h-full transition-colors disabled:opacity-25 disabled:cursor-not-allowed"
+              style={{ color: 'rgba(255,255,255,0.7)', cursor: canUndo ? 'pointer' : 'default' }}>
+              <Undo2 size={12} strokeWidth={2.2} />
+            </button>
+            <div style={{ width: 1, height: 14, background: 'rgba(255,255,255,0.09)' }} />
+            <button onClick={redo} disabled={!canRedo} data-no-pan=""
+              title="Redo (⌘⇧Z)"
+              className="flex items-center justify-center px-2 h-full transition-colors disabled:opacity-25 disabled:cursor-not-allowed"
+              style={{ color: 'rgba(255,255,255,0.7)', cursor: canRedo ? 'pointer' : 'default' }}>
+              <Redo2 size={12} strokeWidth={2.2} />
+            </button>
+          </div>
+          <button onClick={copyPNG} data-no-pan=""
+            className="flex items-center gap-1.5 px-2.5 rounded-md text-[11px] font-medium leading-none transition-colors"
+            style={{
+              height: 28,
+              color: copiedPNG ? 'rgba(134,239,172,1)' : 'rgba(255,255,255,0.7)',
+              background: 'rgba(0,0,0,0.55)',
+              backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.09)',
+              cursor: 'pointer',
+            }}>
+            {copiedPNG ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy as PNG</>}
+          </button>
+          <div ref={fileMenuRef} className="relative">
+            <button onClick={() => setFileMenuOpen(v => !v)} data-no-pan=""
+              title="More options"
+              className="flex items-center justify-center px-2 rounded-md transition-colors"
+              style={{
+                height: 28,
+                color: 'rgba(255,255,255,0.7)', background: 'rgba(0,0,0,0.55)',
+                backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.09)',
+                cursor: 'pointer',
+              }}>
+              <MoreHorizontal size={12} />
+            </button>
+            {fileMenuOpen && (
+              <div className="absolute right-0 top-full mt-1.5 w-44 rounded-md border border-white/[0.08] bg-[#1c1c1c] shadow-lg shadow-black/40 py-1 z-20">
+                <button onClick={() => { setFileMenuOpen(false); exportPNG() }}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-white/60 hover:text-white/90 hover:bg-white/[0.06] transition-colors">
+                  <ImageDown size={12} /> Export as PNG
+                </button>
+                <button onClick={() => { setFileMenuOpen(false); importInputRef.current?.click() }}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-white/60 hover:text-white/90 hover:bg-white/[0.06] transition-colors">
+                  <Import size={12} /> Import gradient (JSON)
+                </button>
+                <button onClick={() => { setFileMenuOpen(false); exportDocumentJSON() }}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-white/60 hover:text-white/90 hover:bg-white/[0.06] transition-colors">
+                  <FileBraces size={12} /> Export gradient (JSON)
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* Canvas + overlays */}
         <div className="absolute inset-0 flex items-center justify-center" style={{ pointerEvents: 'none' }}>
           <div style={{
@@ -1739,6 +2102,12 @@ export default function App() {
             transformOrigin: 'center center',
             willChange: 'transform',
             pointerEvents: 'auto',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+          }}>
+          <div style={{
+            position: 'relative',
             boxShadow: '0 24px 80px rgba(0,0,0,0.75), 0 8px 24px rgba(0,0,0,0.5)',
             overflow: 'hidden',
           }}>
@@ -1972,6 +2341,25 @@ export default function App() {
               </svg>
             )}
           </div>
+
+          {/* Canvas hint */}
+          <div style={{
+            transform: `scale(${1 / view.zoom})`,
+            transformOrigin: 'top center',
+            marginTop: 14 / view.zoom,
+            pointerEvents: 'none',
+            display: 'flex',
+            gap: 16,
+            color: 'rgba(255,255,255,0.2)',
+            fontSize: 11,
+            fontVariantNumeric: 'tabular-nums',
+            userSelect: 'none',
+            letterSpacing: '0.01em',
+          }}>
+            <span>Hold <b style={{ fontWeight: 500, color: 'rgba(255,255,255,0.32)' }}>Space</b> to pan</span>
+            <span><b style={{ fontWeight: 500, color: 'rgba(255,255,255,0.32)' }}>⌘+</b> / <b style={{ fontWeight: 500, color: 'rgba(255,255,255,0.32)' }}>⌘−</b> to zoom</span>
+          </div>
+          </div>
         </div>
 
         {/* Ellipse + resize/rotate handles — only for single selection */}
@@ -2111,7 +2499,7 @@ export default function App() {
                   onMouseEnter={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.18)'; e.currentTarget.style.color = 'rgb(239,68,68)' }}
                   onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.35)' }}
                 >
-                  <IconTrash />
+                  <Trash2 size={11} />
                 </button>
               </div>
               {/* Arrow */}
@@ -2162,7 +2550,7 @@ export default function App() {
                   onMouseEnter={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.18)'; e.currentTarget.style.color = 'rgb(239,68,68)' }}
                   onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.35)' }}
                 >
-                  <IconTrash /> Delete
+                  <Trash2 size={11} /> Delete
                 </button>
               </div>
               <div style={{
@@ -2196,28 +2584,24 @@ export default function App() {
           )
         })()}
 
-        {/* Contrast heatmap toggle */}
-        <div className="absolute bottom-4 left-4 flex flex-col items-start gap-1.5" style={{ pointerEvents: 'auto' }}>
-          {contrastCheck && (
-            <div className="flex items-center gap-2.5 text-[10px]" style={{
-              background: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(6px)',
-              border: '1px solid rgba(255,255,255,0.07)', borderRadius: 6, padding: '4px 8px',
-              color: 'rgba(255,255,255,0.45)',
-            }}>
-              {[
-                ['rgb(34,197,94)', 'Both OK'],
-                ['rgb(59,130,246)', 'White OK'],
-                ['rgb(234,179,8)', 'Black OK'],
-                ['rgb(239,68,68)', 'Neither OK'],
-              ].map(([color, label]) => (
-                <span key={label} className="flex items-center gap-1">
-                  <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block', flexShrink: 0 }} />
-                  {label}
-                </span>
-              ))}
-            </div>
-          )}
+        {/* Zoom badge */}
+        <button
+          data-tour="zoom-badge"
+          onClick={() => setView({ zoom: 1, pan: { x: 0, y: 0 } })}
+          className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 select-none text-[11px] tabular-nums"
+          style={{
+            color: 'rgba(255,255,255,0.35)', background: 'rgba(0,0,0,0.45)',
+            backdropFilter: 'blur(6px)', padding: '3px 9px', borderRadius: 6,
+            border: '1px solid rgba(255,255,255,0.07)',
+            cursor: 'pointer',
+          }}
+          title="Reset zoom (⌘0)"
+        >
+          {Math.round(view.zoom * 100)}%
+        </button>
 
+        {/* Contrast heatmap toggle */}
+        <div data-tour="contrast-toggle" className="absolute top-4 left-4 flex flex-col items-start gap-1.5" style={{ pointerEvents: 'auto' }}>
           <div className="flex items-center gap-1.5">
             <button
               data-no-pan=""
@@ -2233,7 +2617,7 @@ export default function App() {
                 cursor: 'pointer',
               }}
             >
-              <IconContrast />
+              <Contrast size={13} />
             </button>
 
             {contrastCheck && (
@@ -2261,22 +2645,27 @@ export default function App() {
               </div>
             )}
           </div>
-        </div>
 
-        {/* Zoom badge */}
-        <button
-          onClick={() => setView({ zoom: 1, pan: { x: 0, y: 0 } })}
-          className="absolute bottom-4 right-4 select-none text-[11px] tabular-nums"
-          style={{
-            color: 'rgba(255,255,255,0.35)', background: 'rgba(0,0,0,0.45)',
-            backdropFilter: 'blur(6px)', padding: '3px 9px', borderRadius: 6,
-            border: '1px solid rgba(255,255,255,0.07)',
-            cursor: 'pointer',
-          }}
-          title="Reset zoom (⌘0)"
-        >
-          {Math.round(view.zoom * 100)}%
-        </button>
+          {contrastCheck && (
+            <div className="flex items-center gap-2.5 text-[10px]" style={{
+              background: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(6px)',
+              border: '1px solid rgba(255,255,255,0.07)', borderRadius: 6, padding: '4px 8px',
+              color: 'rgba(255,255,255,0.45)',
+            }}>
+              {[
+                ['rgb(34,197,94)', 'Both OK'],
+                ['rgb(59,130,246)', 'White OK'],
+                ['rgb(234,179,8)', 'Black OK'],
+                ['rgb(239,68,68)', 'Neither OK'],
+              ].map(([color, label]) => (
+                <span key={label} className="flex items-center gap-1">
+                  <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block', flexShrink: 0 }} />
+                  {label}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
       </main>
 
     </div>

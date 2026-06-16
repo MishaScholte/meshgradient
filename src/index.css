@@ -17,3 +17,55 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
+
+/* ── Tutorial (driver.js) dark theme ───────────────────────────────────────── */
+.driver-popover.hazy-driver-popover {
+  background-color: #1c1c1c;
+  color: rgba(255,255,255,0.85);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+}
+.hazy-driver-popover .driver-popover-title {
+  color: rgba(255,255,255,0.95);
+  font-size: 13px;
+}
+.hazy-driver-popover .driver-popover-description {
+  color: rgba(255,255,255,0.55);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.hazy-driver-popover .driver-popover-footer button {
+  background-color: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.7);
+  border: 1px solid rgba(255,255,255,0.08);
+  text-shadow: none;
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 4px 10px;
+}
+.hazy-driver-popover .driver-popover-footer button:hover,
+.hazy-driver-popover .driver-popover-footer button:focus {
+  background-color: rgba(255,255,255,0.12);
+  color: rgba(255,255,255,0.95);
+}
+.hazy-driver-popover .driver-popover-progress-text {
+  color: rgba(255,255,255,0.35);
+  font-size: 11px;
+}
+.hazy-driver-popover .driver-popover-arrow-side-left.driver-popover-arrow,
+.hazy-driver-popover .driver-popover-arrow-side-right.driver-popover-arrow,
+.hazy-driver-popover .driver-popover-arrow-side-top.driver-popover-arrow,
+.hazy-driver-popover .driver-popover-arrow-side-bottom.driver-popover-arrow {
+  border-color: transparent;
+}
+.hazy-driver-popover .driver-popover-arrow-side-left { border-left-color: #1c1c1c; }
+.hazy-driver-popover .driver-popover-arrow-side-right { border-right-color: #1c1c1c; }
+.hazy-driver-popover .driver-popover-arrow-side-top { border-top-color: #1c1c1c; }
+.hazy-driver-popover .driver-popover-arrow-side-bottom { border-bottom-color: #1c1c1c; }
+.hazy-driver-popover .driver-popover-close-btn {
+  color: rgba(255,255,255,0.4);
+}
+.hazy-driver-popover .driver-popover-close-btn:hover {
+  color: rgba(255,255,255,0.8);
+}
