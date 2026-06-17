@@ -24,6 +24,7 @@ const DEFAULT_RX = 280
 const DEFAULT_RY = 280
 const MIN_RADIUS = 20
 const ROT_HANDLE_OFFSET = 28
+const ROT_SNAP = Math.PI / 12  // 15°
 const COLOR_DEFAULTS = ['#ff6b6b', '#4fc3f7', '#a29bfe', '#fdcb6e', '#55efc4', '#fd79a8', '#e17055', '#74b9ff']
 const LABELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 const THUMB_W = 64
@@ -617,6 +618,8 @@ function FilterSlider({ label, value, min, max, step = 1, unit, onChange }) {
   )
 }
 
+let dotClipboard = null
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -712,6 +715,7 @@ export default function App() {
   const warpDotDrag = useRef(null)
   const blurDotDrag = useRef(null)
   const ellipseDrag = useRef(null)
+  const groupRotDrag = useRef(null)
   const pinchDist = useRef(null)
   const spaceHeld = useRef(false)
   const [spaceDown, setSpaceDown] = useState(false)
@@ -729,8 +733,20 @@ export default function App() {
     selectedDotIdsRef.current = next
     _setSelectedDotIds(next)
   }
-  const [selectedWarpDotId, setSelectedWarpDotId] = useState(null)
-  const [selectedBlurDotId, setSelectedBlurDotId] = useState(null)
+  const [selectedWarpDotIds, _setSelectedWarpDotIds] = useState(() => new Set())
+  const selectedWarpDotIdsRef = useRef(new Set())
+  function setSelectedWarpDotIds(val) {
+    const next = typeof val === 'function' ? val(selectedWarpDotIdsRef.current) : val
+    selectedWarpDotIdsRef.current = next
+    _setSelectedWarpDotIds(next)
+  }
+  const [selectedBlurDotIds, _setSelectedBlurDotIds] = useState(() => new Set())
+  const selectedBlurDotIdsRef = useRef(new Set())
+  function setSelectedBlurDotIds(val) {
+    const next = typeof val === 'function' ? val(selectedBlurDotIdsRef.current) : val
+    selectedBlurDotIdsRef.current = next
+    _setSelectedBlurDotIds(next)
+  }
   const [paletteName, setPaletteName] = useState('')
   const [savedPalettes, setSavedPalettes] = useState(loadPalettes)
   const [wDraft, setWDraft] = useState(String(CANVAS_W))
@@ -743,8 +759,8 @@ export default function App() {
 
   function resetDocUIState(doc) {
     setSelectedDotIds(new Set())
-    setSelectedWarpDotId(null)
-    setSelectedBlurDotId(null)
+    setSelectedWarpDotIds(new Set())
+    setSelectedBlurDotIds(new Set())
     setActiveColorId(doc.colors[0]?.id ?? null)
     setMode('compose')
     setView({ zoom: 1, pan: { x: 0, y: 0 } })
@@ -921,20 +937,20 @@ export default function App() {
   // ── Canvas coordinate conversion ──────────────────────────────────────────────
 
   function viewportToCanvas(clientX, clientY) {
-    const rect = mainRef.current.getBoundingClientRect()
-    const { zoom, pan } = viewRef.current
-    const W = presentRef.current.size?.w ?? CANVAS_W
-    const H = presentRef.current.size?.h ?? CANVAS_H
-    const ox = clientX - (rect.left + rect.width / 2) - pan.x
-    const oy = clientY - (rect.top + rect.height / 2) - pan.y
-    return { x: ox / zoom + W / 2, y: oy / zoom + H / 2 }
+    const rect = canvasRef.current.getBoundingClientRect()
+    const zoom = viewRef.current.zoom
+    return {
+      x: (clientX - rect.left) / zoom,
+      y: (clientY - rect.top) / zoom,
+    }
   }
 
   function canvasToViewport(cx, cy) {
-    const { width, height } = mainRef.current.getBoundingClientRect()
+    const mainRect = mainRef.current.getBoundingClientRect()
+    const canvasRect = canvasRef.current.getBoundingClientRect()
     return {
-      x: width / 2 + view.pan.x + (cx - cW / 2) * view.zoom,
-      y: height / 2 + view.pan.y + (cy - cH / 2) * view.zoom,
+      x: (canvasRect.left - mainRect.left) + cx * view.zoom,
+      y: (canvasRect.top - mainRect.top) + cy * view.zoom,
     }
   }
 
@@ -946,7 +962,7 @@ export default function App() {
     if (spaceHeld.current) {
       panDrag.current = true
       panLast.current = { x: e.clientX, y: e.clientY }
-    } else if (mode === 'compose') {
+    } else if (mode === 'compose' || mode === 'warp' || mode === 'blur') {
       const bs = { startX: e.clientX, startY: e.clientY, curX: e.clientX, curY: e.clientY, shiftKey: e.shiftKey }
       boxSelectRef.current = bs
       setBoxSelect({ ...bs })
@@ -969,19 +985,33 @@ export default function App() {
       panDrag.current = false
       return
     }
-    if (mode === 'warp') { setSelectedWarpDotId(null); return }
-    if (mode === 'blur') { setSelectedBlurDotId(null); return }
     const bs = boxSelectRef.current
     if (!bs) return
     boxSelectRef.current = null
     setBoxSelect(null)
     const moved = Math.hypot(bs.curX - bs.startX, bs.curY - bs.startY) > 6
+    const p1 = viewportToCanvas(Math.min(bs.startX, bs.curX), Math.min(bs.startY, bs.curY))
+    const p2 = viewportToCanvas(Math.max(bs.startX, bs.curX), Math.max(bs.startY, bs.curY))
+    if (mode === 'warp') {
+      if (!moved) { setSelectedWarpDotIds(new Set()); return }
+      const inside = new Set((presentRef.current.warp.warpDots ?? [])
+        .filter(d => d.x >= p1.x && d.x <= p2.x && d.y >= p1.y && d.y <= p2.y)
+        .map(d => d.id))
+      setSelectedWarpDotIds(bs.shiftKey ? prev => new Set([...prev, ...inside]) : inside)
+      return
+    }
+    if (mode === 'blur') {
+      if (!moved) { setSelectedBlurDotIds(new Set()); return }
+      const inside = new Set((presentRef.current.blurDots ?? [])
+        .filter(d => d.x >= p1.x && d.x <= p2.x && d.y >= p1.y && d.y <= p2.y)
+        .map(d => d.id))
+      setSelectedBlurDotIds(bs.shiftKey ? prev => new Set([...prev, ...inside]) : inside)
+      return
+    }
     if (!moved) {
       setSelectedDotIds(new Set())
       return
     }
-    const p1 = viewportToCanvas(Math.min(bs.startX, bs.curX), Math.min(bs.startY, bs.curY))
-    const p2 = viewportToCanvas(Math.max(bs.startX, bs.curX), Math.max(bs.startY, bs.curY))
     const inside = new Set(presentRef.current.dots
       .filter(d => d.x >= p1.x && d.x <= p2.x && d.y >= p1.y && d.y <= p2.y)
       .map(d => d.id))
@@ -1131,11 +1161,20 @@ export default function App() {
 
   function onWarpDotBodyPointerDown(e, id) {
     e.stopPropagation()
+    if (e.shiftKey) {
+      setSelectedWarpDotIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+      return
+    }
     e.currentTarget.setPointerCapture(e.pointerId)
-    setSelectedWarpDotId(id)
-    const dot = presentRef.current.warp.warpDots.find(d => d.id === id)
-    if (!dot) return
-    warpDotDrag.current = { type: 'body', id, startX: dot.x, startY: dot.y, clientX: e.clientX, clientY: e.clientY, snapshot: presentRef.current }
+    const prevSel = selectedWarpDotIdsRef.current
+    const selIds = prevSel.has(id) ? prevSel : new Set([id])
+    if (!prevSel.has(id)) setSelectedWarpDotIds(selIds)
+    const starts = {}
+    for (const sid of selIds) {
+      const dot = presentRef.current.warp.warpDots.find(d => d.id === sid)
+      if (dot) starts[sid] = { x: dot.x, y: dot.y }
+    }
+    warpDotDrag.current = { type: 'body', id, starts, clientX: e.clientX, clientY: e.clientY, snapshot: presentRef.current }
   }
   function onWarpDotBodyPointerMove(e, id) {
     const wd = warpDotDrag.current
@@ -1146,9 +1185,10 @@ export default function App() {
       ...presentRef.current,
       warp: {
         ...presentRef.current.warp,
-        warpDots: presentRef.current.warp.warpDots.map(d =>
-          d.id === id ? { ...d, x: wd.startX + dx, y: wd.startY + dy } : d
-        ),
+        warpDots: presentRef.current.warp.warpDots.map(d => {
+          const s = wd.starts[d.id]
+          return s ? { ...d, x: s.x + dx, y: s.y + dy } : d
+        }),
       },
     })
   }
@@ -1164,7 +1204,7 @@ export default function App() {
   function onWarpArrowPointerDown(e, id) {
     e.stopPropagation()
     e.currentTarget.setPointerCapture(e.pointerId)
-    setSelectedWarpDotId(id)
+    setSelectedWarpDotIds(new Set([id]))
     warpDotDrag.current = { type: 'arrow', id, snapshot: presentRef.current }
   }
   function onWarpArrowPointerMove(e, id) {
@@ -1195,7 +1235,7 @@ export default function App() {
   function onWarpEllipsePointerDown(e, id, type) {
     e.stopPropagation()
     e.currentTarget.setPointerCapture(e.pointerId)
-    setSelectedWarpDotId(id)
+    setSelectedWarpDotIds(new Set([id]))
     const dot = presentRef.current.warp.warpDots.find(d => d.id === id)
     if (!dot) return
     const cp = viewportToCanvas(e.clientX, e.clientY)
@@ -1225,7 +1265,8 @@ export default function App() {
       let delta = cur - wd.prevAngle
       if (delta > Math.PI) delta -= 2 * Math.PI
       else if (delta < -Math.PI) delta += 2 * Math.PI
-      updated.theta = theta + delta
+      const raw = theta + delta
+      updated.theta = e.shiftKey ? Math.round(raw / ROT_SNAP) * ROT_SNAP : raw
       wd.prevAngle = cur
     }
     liveUpdate({
@@ -1249,11 +1290,20 @@ export default function App() {
 
   function onBlurDotBodyPointerDown(e, id) {
     e.stopPropagation()
+    if (e.shiftKey) {
+      setSelectedBlurDotIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+      return
+    }
     e.currentTarget.setPointerCapture(e.pointerId)
-    setSelectedBlurDotId(id)
-    const dot = presentRef.current.blurDots.find(d => d.id === id)
-    if (!dot) return
-    blurDotDrag.current = { type: 'body', id, startX: dot.x, startY: dot.y, clientX: e.clientX, clientY: e.clientY, snapshot: presentRef.current }
+    const prevSel = selectedBlurDotIdsRef.current
+    const selIds = prevSel.has(id) ? prevSel : new Set([id])
+    if (!prevSel.has(id)) setSelectedBlurDotIds(selIds)
+    const starts = {}
+    for (const sid of selIds) {
+      const dot = presentRef.current.blurDots.find(d => d.id === sid)
+      if (dot) starts[sid] = { x: dot.x, y: dot.y }
+    }
+    blurDotDrag.current = { type: 'body', id, starts, clientX: e.clientX, clientY: e.clientY, snapshot: presentRef.current }
   }
   function onBlurDotBodyPointerMove(e, id) {
     const bd = blurDotDrag.current
@@ -1262,9 +1312,10 @@ export default function App() {
     const dy = (e.clientY - bd.clientY) / viewRef.current.zoom
     liveUpdate({
       ...presentRef.current,
-      blurDots: presentRef.current.blurDots.map(d =>
-        d.id === id ? { ...d, x: bd.startX + dx, y: bd.startY + dy } : d
-      ),
+      blurDots: presentRef.current.blurDots.map(d => {
+        const s = bd.starts[d.id]
+        return s ? { ...d, x: s.x + dx, y: s.y + dy } : d
+      }),
     })
   }
   function onBlurDotBodyPointerUp(e, id) {
@@ -1279,7 +1330,7 @@ export default function App() {
   function onBlurArrowPointerDown(e, id) {
     e.stopPropagation()
     e.currentTarget.setPointerCapture(e.pointerId)
-    setSelectedBlurDotId(id)
+    setSelectedBlurDotIds(new Set([id]))
     blurDotDrag.current = { type: 'arrow', id, snapshot: presentRef.current }
   }
   function onBlurArrowPointerMove(e, id) {
@@ -1307,7 +1358,7 @@ export default function App() {
   function onBlurEllipsePointerDown(e, id, type) {
     e.stopPropagation()
     e.currentTarget.setPointerCapture(e.pointerId)
-    setSelectedBlurDotId(id)
+    setSelectedBlurDotIds(new Set([id]))
     const dot = presentRef.current.blurDots.find(d => d.id === id)
     if (!dot) return
     const cp = viewportToCanvas(e.clientX, e.clientY)
@@ -1333,7 +1384,8 @@ export default function App() {
       let delta = cur - bd.prevAngle
       if (delta > Math.PI) delta -= 2 * Math.PI
       else if (delta < -Math.PI) delta += 2 * Math.PI
-      updated.theta = theta + delta
+      const raw = theta + delta
+      updated.theta = e.shiftKey ? Math.round(raw / ROT_SNAP) * ROT_SNAP : raw
       bd.prevAngle = cur
     }
     liveUpdate({ ...presentRef.current, blurDots: presentRef.current.blurDots.map(d => d.id === id ? updated : d) })
@@ -1345,6 +1397,56 @@ export default function App() {
     setPast(p => [...p.slice(-(MAX_HISTORY - 1)), bd.snapshot])
     setFuture([])
     blurDotDrag.current = null
+  }
+
+  // ── Group rotation (warp + blur) ──────────────────────────────────────────────
+
+  function startGroupRot(e, dotMode, dots) {
+    e.stopPropagation()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const cx = (Math.min(...dots.map(d => d.x)) + Math.max(...dots.map(d => d.x))) / 2
+    const cy = (Math.min(...dots.map(d => d.y)) + Math.max(...dots.map(d => d.y))) / 2
+    const cp = viewportToCanvas(e.clientX, e.clientY)
+    groupRotDrag.current = {
+      dotMode,
+      centroid: { x: cx, y: cy },
+      initAngle: Math.atan2(cp.y - cy, cp.x - cx),
+      starts: dots.map(d => ({ id: d.id, x: d.x, y: d.y, theta: d.theta ?? 0 })),
+      snapshot: presentRef.current,
+    }
+  }
+
+  function onGroupRotPointerMove(e) {
+    const gr = groupRotDrag.current
+    if (!gr) return
+    const cp = viewportToCanvas(e.clientX, e.clientY)
+    let delta = Math.atan2(cp.y - gr.centroid.y, cp.x - gr.centroid.x) - gr.initAngle
+    if (delta > Math.PI) delta -= 2 * Math.PI
+    else if (delta < -Math.PI) delta += 2 * Math.PI
+    if (e.shiftKey) delta = Math.round(delta / ROT_SNAP) * ROT_SNAP
+    const cos = Math.cos(delta), sin = Math.sin(delta)
+    const { x: ocx, y: ocy } = gr.centroid
+    const applyRot = (d) => {
+      const s = gr.starts.find(s => s.id === d.id)
+      if (!s) return d
+      const rx = s.x - ocx, ry = s.y - ocy
+      return { ...d, x: ocx + rx * cos - ry * sin, y: ocy + rx * sin + ry * cos, theta: s.theta + delta }
+    }
+    const cur = presentRef.current
+    if (gr.dotMode === 'warp') {
+      liveUpdate({ ...cur, warp: { ...cur.warp, warpDots: cur.warp.warpDots.map(applyRot) } })
+    } else {
+      liveUpdate({ ...cur, blurDots: (cur.blurDots ?? []).map(applyRot) })
+    }
+  }
+
+  function onGroupRotPointerUp(e) {
+    e.stopPropagation()
+    const gr = groupRotDrag.current
+    if (!gr) return
+    setPast(p => [...p.slice(-(MAX_HISTORY - 1)), gr.snapshot])
+    setFuture([])
+    groupRotDrag.current = null
   }
 
   // ── Color operations ──────────────────────────────────────────────────────────
@@ -1407,28 +1509,127 @@ export default function App() {
   function placeWarpDot(x, y) {
     const dot = { id: uid(), x, y, dx: 0, dy: 0, rx: DEFAULT_WARP_R, ry: DEFAULT_WARP_R, theta: 0 }
     commit({ ...present, warp: { ...present.warp, warpDots: [...(present.warp.warpDots ?? []), dot] } })
-    setSelectedWarpDotId(dot.id)
+    setSelectedWarpDotIds(new Set([dot.id]))
   }
 
-  function deleteSelectedWarpDot() {
-    if (!selectedWarpDotId) return
-    commit({ ...present, warp: { ...present.warp, warpDots: present.warp.warpDots.filter(d => d.id !== selectedWarpDotId) } })
-    setSelectedWarpDotId(null)
+  function deleteSelectedWarpDots() {
+    if (!selectedWarpDotIds.size) return
+    commit({ ...present, warp: { ...present.warp, warpDots: present.warp.warpDots.filter(d => !selectedWarpDotIds.has(d.id)) } })
+    setSelectedWarpDotIds(new Set())
   }
 
   function placeBlurDot(x, y) {
     const dot = { id: uid(), x, y, dx: 0, dy: 0, rx: DEFAULT_WARP_R, ry: DEFAULT_WARP_R, theta: 0 }
     commit({ ...present, blurDots: [...(present.blurDots ?? []), dot] })
-    setSelectedBlurDotId(dot.id)
+    setSelectedBlurDotIds(new Set([dot.id]))
   }
-  function deleteSelectedBlurDot() {
-    if (!selectedBlurDotId) return
-    commit({ ...present, blurDots: (present.blurDots ?? []).filter(d => d.id !== selectedBlurDotId) })
-    setSelectedBlurDotId(null)
+  function deleteSelectedBlurDots() {
+    if (!selectedBlurDotIds.size) return
+    commit({ ...present, blurDots: (present.blurDots ?? []).filter(d => !selectedBlurDotIds.has(d.id)) })
+    setSelectedBlurDotIds(new Set())
   }
   function clearBlurDots() {
     commit({ ...present, blurDots: [] })
-    setSelectedBlurDotId(null)
+    setSelectedBlurDotIds(new Set())
+  }
+
+  // ── Dot copy / paste ──────────────────────────────────────────────────────────
+
+  function copyDots() {
+    if (mode === 'compose' && selectedDotIds.size > 0) {
+      const colorMap = Object.fromEntries(present.colors.map(c => [c.id, c]))
+      const items = [...selectedDotIds].map(id => {
+        const dot = present.dots.find(d => d.id === id)
+        if (!dot) return null
+        return {
+          fx: dot.x / cW, fy: dot.y / cH,
+          frx: (dot.rx ?? DEFAULT_RX) / cW, fry: (dot.ry ?? DEFAULT_RY) / cH,
+          theta: dot.theta ?? 0,
+          colorHex: colorMap[dot.colorId]?.hex ?? '#ffffff',
+        }
+      }).filter(Boolean)
+      dotClipboard = { type: 'compose', docId: activeDocId, items }
+    } else if (mode === 'warp' && selectedWarpDotIds.size > 0) {
+      const items = [...selectedWarpDotIds].map(id => {
+        const dot = present.warp.warpDots.find(d => d.id === id)
+        if (!dot) return null
+        return {
+          fx: dot.x / cW, fy: dot.y / cH,
+          fdx: dot.dx / cW, fdy: dot.dy / cH,
+          frx: (dot.rx ?? DEFAULT_WARP_R) / cW, fry: (dot.ry ?? DEFAULT_WARP_R) / cH,
+          theta: dot.theta ?? 0,
+        }
+      }).filter(Boolean)
+      dotClipboard = { type: 'warp', docId: activeDocId, items }
+    } else if (mode === 'blur' && selectedBlurDotIds.size > 0) {
+      const items = [...selectedBlurDotIds].map(id => {
+        const dot = present.blurDots.find(d => d.id === id)
+        if (!dot) return null
+        return {
+          fx: dot.x / cW, fy: dot.y / cH,
+          fdx: dot.dx / cW, fdy: dot.dy / cH,
+          frx: (dot.rx ?? DEFAULT_WARP_R) / cW, fry: (dot.ry ?? DEFAULT_WARP_R) / cH,
+          theta: dot.theta ?? 0,
+        }
+      }).filter(Boolean)
+      dotClipboard = { type: 'blur', docId: activeDocId, items }
+    } else {
+      dotClipboard = null
+    }
+  }
+
+  function pasteDots() {
+    if (!dotClipboard) return
+    const { type, items } = dotClipboard
+    if (type === 'compose') {
+      const colorIdMap = {}
+      const newColors = []
+      items.forEach(item => {
+        const existing = present.colors.find(c => c.hex === item.colorHex)
+        if (existing) {
+          colorIdMap[item.colorHex] = existing.id
+        } else {
+          const nc = { id: uid(), hex: item.colorHex }
+          newColors.push(nc)
+          colorIdMap[item.colorHex] = nc.id
+        }
+      })
+      const off = dotClipboard.docId === activeDocId ? 10 : 0
+      const newDots = items.map(item => ({
+        id: uid(), colorId: colorIdMap[item.colorHex],
+        x: item.fx * cW + off, y: item.fy * cH + off,
+        rx: item.frx * cW, ry: item.fry * cH,
+        theta: item.theta,
+      }))
+      commit({ ...present, colors: [...present.colors, ...newColors], dots: [...present.dots, ...newDots] })
+      setSelectedDotIds(new Set(newDots.map(d => d.id)))
+      if (newDots[0]) setActiveColorId(newDots[0].colorId)
+      setMode('compose')
+    } else if (type === 'warp') {
+      const off = dotClipboard.docId === activeDocId ? 10 : 0
+      const newDots = items.map(item => ({
+        id: uid(),
+        x: item.fx * cW + off, y: item.fy * cH + off,
+        dx: item.fdx * cW, dy: item.fdy * cH,
+        rx: item.frx * cW, ry: item.fry * cH,
+        theta: item.theta,
+      }))
+      commit({ ...present, warp: { ...present.warp, warpDots: [...(present.warp.warpDots ?? []), ...newDots] } })
+      setSelectedWarpDotIds(new Set(newDots.map(d => d.id)))
+      setMode('warp')
+    } else if (type === 'blur') {
+      const off = dotClipboard.docId === activeDocId ? 10 : 0
+      const newDots = items.map(item => ({
+        id: uid(),
+        x: item.fx * cW + off, y: item.fy * cH + off,
+        dx: item.fdx * cW, dy: item.fdy * cH,
+        rx: item.frx * cW, ry: item.fry * cH,
+        theta: item.theta,
+      }))
+      commit({ ...present, blurDots: [...(present.blurDots ?? []), ...newDots] })
+      setSelectedBlurDotIds(new Set(newDots.map(d => d.id)))
+      setMode('blur')
+    }
   }
 
   function reassignDot(dotId, colorId) {
@@ -1617,7 +1818,7 @@ export default function App() {
   }
   function clearWarpDots() {
     commit({ ...present, warp: { ...present.warp, warpDots: [] } })
-    setSelectedWarpDotId(null)
+    setSelectedWarpDotIds(new Set())
   }
 
   // ── Filter operations ─────────────────────────────────────────────────────────
@@ -1663,6 +1864,7 @@ export default function App() {
 
   useEffect(() => {
     function onPaste(e) {
+      if (dotClipboard !== null) return
       const active = document.activeElement
       const isEditable = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)
       if (isEditable) return
@@ -1701,11 +1903,27 @@ export default function App() {
         return
       }
       if (e.target.tagName === 'INPUT') return
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key) && !e.metaKey && !e.ctrlKey) {
+        const step = e.shiftKey ? 10 : 1
+        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0
+        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0
+        const cur = presentRef.current
+        if (mode === 'compose' && selectedDotIds.size > 0) {
+          e.preventDefault()
+          commit({ ...cur, dots: cur.dots.map(d => selectedDotIds.has(d.id) ? { ...d, x: d.x + dx, y: d.y + dy } : d) })
+        } else if (mode === 'warp' && selectedWarpDotIds.size > 0) {
+          e.preventDefault()
+          commit({ ...cur, warp: { ...cur.warp, warpDots: cur.warp.warpDots.map(d => selectedWarpDotIds.has(d.id) ? { ...d, x: d.x + dx, y: d.y + dy } : d) } })
+        } else if (mode === 'blur' && selectedBlurDotIds.size > 0) {
+          e.preventDefault()
+          commit({ ...cur, blurDots: (cur.blurDots ?? []).map(d => selectedBlurDotIds.has(d.id) ? { ...d, x: d.x + dx, y: d.y + dy } : d) })
+        }
+      }
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (mode === 'warp' && selectedWarpDotId) {
-          e.preventDefault(); deleteSelectedWarpDot()
-        } else if (mode === 'blur' && selectedBlurDotId) {
-          e.preventDefault(); deleteSelectedBlurDot()
+        if (mode === 'warp' && selectedWarpDotIds.size > 0) {
+          e.preventDefault(); deleteSelectedWarpDots()
+        } else if (mode === 'blur' && selectedBlurDotIds.size > 0) {
+          e.preventDefault(); deleteSelectedBlurDots()
         } else if (mode === 'compose' && selectedDotIds.size > 0) {
           e.preventDefault(); deleteSelectedDots()
         }
@@ -1714,10 +1932,26 @@ export default function App() {
         e.preventDefault()
         if (e.shiftKey) redo(); else undo()
       }
+      if (e.key === 'c' && (e.metaKey || e.ctrlKey)) {
+        const hasSelection =
+          (mode === 'compose' && selectedDotIds.size > 0) ||
+          (mode === 'warp' && selectedWarpDotIds.size > 0) ||
+          (mode === 'blur' && selectedBlurDotIds.size > 0)
+        if (hasSelection) {
+          e.preventDefault()
+          copyDots()
+        } else {
+          dotClipboard = null
+        }
+      }
+      if (e.key === 'v' && (e.metaKey || e.ctrlKey) && dotClipboard !== null) {
+        e.preventDefault()
+        pasteDots()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selectedDotIds, selectedWarpDotId, selectedBlurDotId, mode, past, future])
+  }, [selectedDotIds, selectedWarpDotIds, selectedBlurDotIds, mode, past, future])
 
   // ── Derived ───────────────────────────────────────────────────────────────────
 
@@ -2012,8 +2246,8 @@ export default function App() {
                   onClick={() => {
                     setMode(m)
                     if (m !== 'compose') setSelectedDotIds(new Set())
-                    if (m !== 'warp') setSelectedWarpDotId(null)
-                    if (m !== 'blur') setSelectedBlurDotId(null)
+                    if (m !== 'warp') setSelectedWarpDotIds(new Set())
+                    if (m !== 'blur') setSelectedBlurDotIds(new Set())
                   }}
                   style={{
                     padding: '4px 14px',
@@ -2177,169 +2411,225 @@ export default function App() {
             })}
 
             {/* Warp dots overlay */}
-            {mode === 'warp' && (
-              <svg style={{
-                position: 'absolute', left: 0, top: 0,
-                width: cW, height: cH,
-                overflow: 'visible', pointerEvents: 'none',
-              }}>
-                {(present.warp.warpDots ?? []).map(wd => {
-                  const sel = selectedWarpDotId === wd.id
-                  const ax = wd.x + wd.dx, ay = wd.y + wd.dy
-                  const hasDelta = wd.dx !== 0 || wd.dy !== 0
-                  const theta = wd.theta ?? 0
-                  const rx = wd.rx ?? DEFAULT_WARP_R
-                  const ry = wd.ry ?? DEFAULT_WARP_R
-                  const cosT = Math.cos(theta), sinT = Math.sin(theta)
-                  const rxHx = wd.x + rx * cosT, rxHy = wd.y + rx * sinT
-                  const ryHx = wd.x - ry * sinT, ryHy = wd.y + ry * cosT
-                  const rotHx = wd.x + (rx + ROT_HANDLE_OFFSET) * cosT
-                  const rotHy = wd.y + (rx + ROT_HANDLE_OFFSET) * sinT
-                  return (
-                    <g key={wd.id}>
-                      {/* Dashed ellipse */}
-                      <ellipse cx={wd.x} cy={wd.y} rx={rx} ry={ry}
-                        fill={sel ? 'rgba(139,92,246,0.06)' : 'rgba(255,255,255,0.02)'}
-                        stroke={sel ? 'rgba(139,92,246,0.4)' : 'rgba(255,255,255,0.12)'}
-                        strokeWidth={1} strokeDasharray="4 3" pointerEvents="none"
-                        transform={`rotate(${theta * 180 / Math.PI}, ${wd.x}, ${wd.y})`}
+            {mode === 'warp' && (() => {
+              const warpDots = present.warp.warpDots ?? []
+              const selDots = warpDots.filter(d => selectedWarpDotIds.has(d.id))
+              const multiSel = selectedWarpDotIds.size > 1
+              const minX = multiSel ? Math.min(...selDots.map(d => d.x)) : 0
+              const maxX = multiSel ? Math.max(...selDots.map(d => d.x)) : 0
+              const minY = multiSel ? Math.min(...selDots.map(d => d.y)) : 0
+              const maxY = multiSel ? Math.max(...selDots.map(d => d.y)) : 0
+              const bcx = (minX + maxX) / 2
+              const GRP_ROT_DIST = 44
+              return (
+                <svg style={{
+                  position: 'absolute', left: 0, top: 0,
+                  width: cW, height: cH,
+                  overflow: 'visible', pointerEvents: 'none',
+                }}>
+                  {/* Bounding box + group rotation handle */}
+                  {multiSel && (
+                    <>
+                      <rect x={minX} y={minY} width={Math.max(1, maxX - minX)} height={Math.max(1, maxY - minY)}
+                        fill="none" stroke="rgba(139,92,246,0.3)" strokeWidth={1} strokeDasharray="4 3"
+                        pointerEvents="none"
                       />
-                      {/* Arrow line */}
-                      {hasDelta && (
-                        <line x1={wd.x} y1={wd.y} x2={ax} y2={ay}
-                          stroke="rgba(255,255,255,0.55)" strokeWidth={1.5} pointerEvents="none"
-                        />
-                      )}
-                      {/* Dot body */}
-                      <circle cx={wd.x} cy={wd.y} r={6}
-                        fill={sel ? 'rgb(139,92,246)' : 'rgba(255,255,255,0.8)'}
-                        stroke={sel ? 'rgba(109,40,217,0.9)' : 'rgba(0,0,0,0.4)'}
-                        strokeWidth={1.5}
-                        style={{ cursor: 'move', pointerEvents: 'all' }}
-                        onPointerDown={e => onWarpDotBodyPointerDown(e, wd.id)}
-                        onPointerMove={e => onWarpDotBodyPointerMove(e, wd.id)}
-                        onPointerUp={e => onWarpDotBodyPointerUp(e, wd.id)}
+                      <line x1={bcx} y1={minY} x2={bcx} y2={minY - GRP_ROT_DIST}
+                        stroke="rgba(255,255,255,0.2)" strokeWidth={1} pointerEvents="none"
                       />
-                      {/* Arrow tip */}
-                      <circle cx={ax} cy={ay} r={5}
-                        fill="rgba(251,191,36,0.9)" stroke="rgba(0,0,0,0.4)" strokeWidth={1.5}
+                      <circle cx={bcx} cy={minY - GRP_ROT_DIST} r={6}
+                        fill="rgb(139,92,246)" stroke="rgba(255,255,255,0.5)" strokeWidth={1.5}
                         style={{ cursor: 'grab', pointerEvents: 'all' }}
-                        onPointerDown={e => onWarpArrowPointerDown(e, wd.id)}
-                        onPointerMove={e => onWarpArrowPointerMove(e, wd.id)}
-                        onPointerUp={e => onWarpArrowPointerUp(e, wd.id)}
+                        onPointerDown={e => startGroupRot(e, 'warp', selDots)}
+                        onPointerMove={onGroupRotPointerMove}
+                        onPointerUp={onGroupRotPointerUp}
                       />
-                      {/* Ellipse handles — only when selected */}
-                      {sel && (
-                        <>
-                          <line x1={rxHx} y1={rxHy} x2={rotHx} y2={rotHy}
-                            stroke="rgba(255,255,255,0.2)" strokeWidth={1} pointerEvents="none"
+                    </>
+                  )}
+                  {warpDots.map(wd => {
+                    const sel = selectedWarpDotIds.has(wd.id)
+                    const ax = wd.x + wd.dx, ay = wd.y + wd.dy
+                    const hasDelta = wd.dx !== 0 || wd.dy !== 0
+                    const theta = wd.theta ?? 0
+                    const rx = wd.rx ?? DEFAULT_WARP_R
+                    const ry = wd.ry ?? DEFAULT_WARP_R
+                    const cosT = Math.cos(theta), sinT = Math.sin(theta)
+                    const rxHx = wd.x + rx * cosT, rxHy = wd.y + rx * sinT
+                    const ryHx = wd.x - ry * sinT, ryHy = wd.y + ry * cosT
+                    const rotHx = wd.x + (rx + ROT_HANDLE_OFFSET) * cosT
+                    const rotHy = wd.y + (rx + ROT_HANDLE_OFFSET) * sinT
+                    return (
+                      <g key={wd.id}>
+                        <ellipse cx={wd.x} cy={wd.y} rx={rx} ry={ry}
+                          fill={sel ? 'rgba(139,92,246,0.06)' : 'rgba(255,255,255,0.02)'}
+                          stroke={sel ? 'rgba(139,92,246,0.4)' : 'rgba(255,255,255,0.12)'}
+                          strokeWidth={1} strokeDasharray="4 3" pointerEvents="none"
+                          transform={`rotate(${theta * 180 / Math.PI}, ${wd.x}, ${wd.y})`}
+                        />
+                        {hasDelta && (
+                          <line x1={wd.x} y1={wd.y} x2={ax} y2={ay}
+                            stroke="rgba(255,255,255,0.55)" strokeWidth={1.5} pointerEvents="none"
                           />
-                          <circle cx={rxHx} cy={rxHy} r={5}
-                            fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
-                            style={{ cursor: 'col-resize', pointerEvents: 'all' }}
-                            onPointerDown={e => onWarpEllipsePointerDown(e, wd.id, 'rx')}
-                            onPointerMove={e => onWarpEllipsePointerMove(e, wd.id, 'rx')}
-                            onPointerUp={e => onWarpEllipsePointerUp(e, wd.id)}
-                          />
-                          <circle cx={ryHx} cy={ryHy} r={5}
-                            fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
-                            style={{ cursor: 'row-resize', pointerEvents: 'all' }}
-                            onPointerDown={e => onWarpEllipsePointerDown(e, wd.id, 'ry')}
-                            onPointerMove={e => onWarpEllipsePointerMove(e, wd.id, 'ry')}
-                            onPointerUp={e => onWarpEllipsePointerUp(e, wd.id)}
-                          />
-                          <circle cx={rotHx} cy={rotHy} r={5}
-                            fill="rgb(139,92,246)" stroke="rgba(255,255,255,0.5)" strokeWidth={1.5}
-                            style={{ cursor: 'grab', pointerEvents: 'all' }}
-                            onPointerDown={e => onWarpEllipsePointerDown(e, wd.id, 'rot')}
-                            onPointerMove={e => onWarpEllipsePointerMove(e, wd.id, 'rot')}
-                            onPointerUp={e => onWarpEllipsePointerUp(e, wd.id)}
-                          />
-                        </>
-                      )}
-                    </g>
-                  )
-                })}
-              </svg>
-            )}
+                        )}
+                        <circle cx={wd.x} cy={wd.y} r={6}
+                          fill={sel ? 'rgb(139,92,246)' : 'rgba(255,255,255,0.8)'}
+                          stroke={sel ? 'rgba(109,40,217,0.9)' : 'rgba(0,0,0,0.4)'}
+                          strokeWidth={1.5}
+                          style={{ cursor: 'move', pointerEvents: 'all' }}
+                          onPointerDown={e => onWarpDotBodyPointerDown(e, wd.id)}
+                          onPointerMove={e => onWarpDotBodyPointerMove(e, wd.id)}
+                          onPointerUp={e => onWarpDotBodyPointerUp(e, wd.id)}
+                        />
+                        <circle cx={ax} cy={ay} r={5}
+                          fill="rgba(251,191,36,0.9)" stroke="rgba(0,0,0,0.4)" strokeWidth={1.5}
+                          style={{ cursor: 'grab', pointerEvents: 'all' }}
+                          onPointerDown={e => onWarpArrowPointerDown(e, wd.id)}
+                          onPointerMove={e => onWarpArrowPointerMove(e, wd.id)}
+                          onPointerUp={e => onWarpArrowPointerUp(e, wd.id)}
+                        />
+                        {/* Per-dot ellipse handles — single selection only */}
+                        {sel && !multiSel && (
+                          <>
+                            <line x1={rxHx} y1={rxHy} x2={rotHx} y2={rotHy}
+                              stroke="rgba(255,255,255,0.2)" strokeWidth={1} pointerEvents="none"
+                            />
+                            <circle cx={rxHx} cy={rxHy} r={5}
+                              fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
+                              style={{ cursor: 'col-resize', pointerEvents: 'all' }}
+                              onPointerDown={e => onWarpEllipsePointerDown(e, wd.id, 'rx')}
+                              onPointerMove={e => onWarpEllipsePointerMove(e, wd.id, 'rx')}
+                              onPointerUp={e => onWarpEllipsePointerUp(e, wd.id)}
+                            />
+                            <circle cx={ryHx} cy={ryHy} r={5}
+                              fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
+                              style={{ cursor: 'row-resize', pointerEvents: 'all' }}
+                              onPointerDown={e => onWarpEllipsePointerDown(e, wd.id, 'ry')}
+                              onPointerMove={e => onWarpEllipsePointerMove(e, wd.id, 'ry')}
+                              onPointerUp={e => onWarpEllipsePointerUp(e, wd.id)}
+                            />
+                            <circle cx={rotHx} cy={rotHy} r={5}
+                              fill="rgb(139,92,246)" stroke="rgba(255,255,255,0.5)" strokeWidth={1.5}
+                              style={{ cursor: 'grab', pointerEvents: 'all' }}
+                              onPointerDown={e => onWarpEllipsePointerDown(e, wd.id, 'rot')}
+                              onPointerMove={e => onWarpEllipsePointerMove(e, wd.id, 'rot')}
+                              onPointerUp={e => onWarpEllipsePointerUp(e, wd.id)}
+                            />
+                          </>
+                        )}
+                      </g>
+                    )
+                  })}
+                </svg>
+              )
+            })()}
 
             {/* Blur dots overlay */}
-            {mode === 'blur' && (
-              <svg style={{ position: 'absolute', left: 0, top: 0, width: cW, height: cH, overflow: 'visible', pointerEvents: 'none' }}>
-                {(present.blurDots ?? []).map(bd => {
-                  const sel = selectedBlurDotId === bd.id
-                  const ax = bd.x + bd.dx, ay = bd.y + bd.dy
-                  const hasDelta = bd.dx !== 0 || bd.dy !== 0
-                  const theta = bd.theta ?? 0
-                  const rx = bd.rx ?? DEFAULT_WARP_R
-                  const ry = bd.ry ?? DEFAULT_WARP_R
-                  const cosT = Math.cos(theta), sinT = Math.sin(theta)
-                  const rxHx = bd.x + rx * cosT, rxHy = bd.y + rx * sinT
-                  const ryHx = bd.x - ry * sinT, ryHy = bd.y + ry * cosT
-                  const rotHx = bd.x + (rx + ROT_HANDLE_OFFSET) * cosT
-                  const rotHy = bd.y + (rx + ROT_HANDLE_OFFSET) * sinT
-                  return (
-                    <g key={bd.id}>
-                      <ellipse cx={bd.x} cy={bd.y} rx={rx} ry={ry}
-                        fill={sel ? 'rgba(249,115,22,0.06)' : 'rgba(255,255,255,0.02)'}
-                        stroke={sel ? 'rgba(249,115,22,0.4)' : 'rgba(255,255,255,0.12)'}
-                        strokeWidth={1} strokeDasharray="4 3" pointerEvents="none"
-                        transform={`rotate(${theta * 180 / Math.PI}, ${bd.x}, ${bd.y})`}
+            {mode === 'blur' && (() => {
+              const blurDots = present.blurDots ?? []
+              const selDots = blurDots.filter(d => selectedBlurDotIds.has(d.id))
+              const multiSel = selectedBlurDotIds.size > 1
+              const minX = multiSel ? Math.min(...selDots.map(d => d.x)) : 0
+              const maxX = multiSel ? Math.max(...selDots.map(d => d.x)) : 0
+              const minY = multiSel ? Math.min(...selDots.map(d => d.y)) : 0
+              const maxY = multiSel ? Math.max(...selDots.map(d => d.y)) : 0
+              const bcx = (minX + maxX) / 2
+              const GRP_ROT_DIST = 44
+              return (
+                <svg style={{ position: 'absolute', left: 0, top: 0, width: cW, height: cH, overflow: 'visible', pointerEvents: 'none' }}>
+                  {multiSel && (
+                    <>
+                      <rect x={minX} y={minY} width={Math.max(1, maxX - minX)} height={Math.max(1, maxY - minY)}
+                        fill="none" stroke="rgba(249,115,22,0.3)" strokeWidth={1} strokeDasharray="4 3"
+                        pointerEvents="none"
                       />
-                      {hasDelta && (
-                        <line x1={bd.x} y1={bd.y} x2={ax} y2={ay}
-                          stroke="rgba(255,255,255,0.55)" strokeWidth={1.5} pointerEvents="none"
-                        />
-                      )}
-                      <circle cx={bd.x} cy={bd.y} r={6}
-                        fill={sel ? 'rgb(249,115,22)' : 'rgba(255,255,255,0.8)'}
-                        stroke={sel ? 'rgba(234,88,12,0.9)' : 'rgba(0,0,0,0.4)'}
-                        strokeWidth={1.5}
-                        style={{ cursor: 'move', pointerEvents: 'all' }}
-                        onPointerDown={e => onBlurDotBodyPointerDown(e, bd.id)}
-                        onPointerMove={e => onBlurDotBodyPointerMove(e, bd.id)}
-                        onPointerUp={e => onBlurDotBodyPointerUp(e, bd.id)}
+                      <line x1={bcx} y1={minY} x2={bcx} y2={minY - GRP_ROT_DIST}
+                        stroke="rgba(255,255,255,0.2)" strokeWidth={1} pointerEvents="none"
                       />
-                      <circle cx={ax} cy={ay} r={5}
-                        fill="rgba(251,191,36,0.9)" stroke="rgba(0,0,0,0.4)" strokeWidth={1.5}
+                      <circle cx={bcx} cy={minY - GRP_ROT_DIST} r={6}
+                        fill="rgb(249,115,22)" stroke="rgba(255,255,255,0.5)" strokeWidth={1.5}
                         style={{ cursor: 'grab', pointerEvents: 'all' }}
-                        onPointerDown={e => onBlurArrowPointerDown(e, bd.id)}
-                        onPointerMove={e => onBlurArrowPointerMove(e, bd.id)}
-                        onPointerUp={e => onBlurArrowPointerUp(e, bd.id)}
+                        onPointerDown={e => startGroupRot(e, 'blur', selDots)}
+                        onPointerMove={onGroupRotPointerMove}
+                        onPointerUp={onGroupRotPointerUp}
                       />
-                      {sel && (
-                        <>
-                          <line x1={rxHx} y1={rxHy} x2={rotHx} y2={rotHy}
-                            stroke="rgba(255,255,255,0.2)" strokeWidth={1} pointerEvents="none"
+                    </>
+                  )}
+                  {blurDots.map(bd => {
+                    const sel = selectedBlurDotIds.has(bd.id)
+                    const ax = bd.x + bd.dx, ay = bd.y + bd.dy
+                    const hasDelta = bd.dx !== 0 || bd.dy !== 0
+                    const theta = bd.theta ?? 0
+                    const rx = bd.rx ?? DEFAULT_WARP_R
+                    const ry = bd.ry ?? DEFAULT_WARP_R
+                    const cosT = Math.cos(theta), sinT = Math.sin(theta)
+                    const rxHx = bd.x + rx * cosT, rxHy = bd.y + rx * sinT
+                    const ryHx = bd.x - ry * sinT, ryHy = bd.y + ry * cosT
+                    const rotHx = bd.x + (rx + ROT_HANDLE_OFFSET) * cosT
+                    const rotHy = bd.y + (rx + ROT_HANDLE_OFFSET) * sinT
+                    return (
+                      <g key={bd.id}>
+                        <ellipse cx={bd.x} cy={bd.y} rx={rx} ry={ry}
+                          fill={sel ? 'rgba(249,115,22,0.06)' : 'rgba(255,255,255,0.02)'}
+                          stroke={sel ? 'rgba(249,115,22,0.4)' : 'rgba(255,255,255,0.12)'}
+                          strokeWidth={1} strokeDasharray="4 3" pointerEvents="none"
+                          transform={`rotate(${theta * 180 / Math.PI}, ${bd.x}, ${bd.y})`}
+                        />
+                        {hasDelta && (
+                          <line x1={bd.x} y1={bd.y} x2={ax} y2={ay}
+                            stroke="rgba(255,255,255,0.55)" strokeWidth={1.5} pointerEvents="none"
                           />
-                          <circle cx={rxHx} cy={rxHy} r={5}
-                            fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
-                            style={{ cursor: 'col-resize', pointerEvents: 'all' }}
-                            onPointerDown={e => onBlurEllipsePointerDown(e, bd.id, 'rx')}
-                            onPointerMove={e => onBlurEllipsePointerMove(e, bd.id, 'rx')}
-                            onPointerUp={e => onBlurEllipsePointerUp(e, bd.id)}
-                          />
-                          <circle cx={ryHx} cy={ryHy} r={5}
-                            fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
-                            style={{ cursor: 'row-resize', pointerEvents: 'all' }}
-                            onPointerDown={e => onBlurEllipsePointerDown(e, bd.id, 'ry')}
-                            onPointerMove={e => onBlurEllipsePointerMove(e, bd.id, 'ry')}
-                            onPointerUp={e => onBlurEllipsePointerUp(e, bd.id)}
-                          />
-                          <circle cx={rotHx} cy={rotHy} r={5}
-                            fill="rgb(249,115,22)" stroke="rgba(255,255,255,0.5)" strokeWidth={1.5}
-                            style={{ cursor: 'grab', pointerEvents: 'all' }}
-                            onPointerDown={e => onBlurEllipsePointerDown(e, bd.id, 'rot')}
-                            onPointerMove={e => onBlurEllipsePointerMove(e, bd.id, 'rot')}
-                            onPointerUp={e => onBlurEllipsePointerUp(e, bd.id)}
-                          />
-                        </>
-                      )}
-                    </g>
-                  )
-                })}
-              </svg>
-            )}
+                        )}
+                        <circle cx={bd.x} cy={bd.y} r={6}
+                          fill={sel ? 'rgb(249,115,22)' : 'rgba(255,255,255,0.8)'}
+                          stroke={sel ? 'rgba(234,88,12,0.9)' : 'rgba(0,0,0,0.4)'}
+                          strokeWidth={1.5}
+                          style={{ cursor: 'move', pointerEvents: 'all' }}
+                          onPointerDown={e => onBlurDotBodyPointerDown(e, bd.id)}
+                          onPointerMove={e => onBlurDotBodyPointerMove(e, bd.id)}
+                          onPointerUp={e => onBlurDotBodyPointerUp(e, bd.id)}
+                        />
+                        <circle cx={ax} cy={ay} r={5}
+                          fill="rgba(251,191,36,0.9)" stroke="rgba(0,0,0,0.4)" strokeWidth={1.5}
+                          style={{ cursor: 'grab', pointerEvents: 'all' }}
+                          onPointerDown={e => onBlurArrowPointerDown(e, bd.id)}
+                          onPointerMove={e => onBlurArrowPointerMove(e, bd.id)}
+                          onPointerUp={e => onBlurArrowPointerUp(e, bd.id)}
+                        />
+                        {/* Per-dot ellipse handles — single selection only */}
+                        {sel && !multiSel && (
+                          <>
+                            <line x1={rxHx} y1={rxHy} x2={rotHx} y2={rotHy}
+                              stroke="rgba(255,255,255,0.2)" strokeWidth={1} pointerEvents="none"
+                            />
+                            <circle cx={rxHx} cy={rxHy} r={5}
+                              fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
+                              style={{ cursor: 'col-resize', pointerEvents: 'all' }}
+                              onPointerDown={e => onBlurEllipsePointerDown(e, bd.id, 'rx')}
+                              onPointerMove={e => onBlurEllipsePointerMove(e, bd.id, 'rx')}
+                              onPointerUp={e => onBlurEllipsePointerUp(e, bd.id)}
+                            />
+                            <circle cx={ryHx} cy={ryHy} r={5}
+                              fill="white" stroke="rgba(0,0,0,0.35)" strokeWidth={1.5}
+                              style={{ cursor: 'row-resize', pointerEvents: 'all' }}
+                              onPointerDown={e => onBlurEllipsePointerDown(e, bd.id, 'ry')}
+                              onPointerMove={e => onBlurEllipsePointerMove(e, bd.id, 'ry')}
+                              onPointerUp={e => onBlurEllipsePointerUp(e, bd.id)}
+                            />
+                            <circle cx={rotHx} cy={rotHy} r={5}
+                              fill="rgb(249,115,22)" stroke="rgba(255,255,255,0.5)" strokeWidth={1.5}
+                              style={{ cursor: 'grab', pointerEvents: 'all' }}
+                              onPointerDown={e => onBlurEllipsePointerDown(e, bd.id, 'rot')}
+                              onPointerMove={e => onBlurEllipsePointerMove(e, bd.id, 'rot')}
+                              onPointerUp={e => onBlurEllipsePointerUp(e, bd.id)}
+                            />
+                          </>
+                        )}
+                      </g>
+                    )
+                  })}
+                </svg>
+              )
+            })()}
           </div>
 
           {/* Canvas hint (hidden when contrast is active) */}
@@ -2421,7 +2711,7 @@ export default function App() {
         </div>
 
         {/* Ellipse + resize/rotate handles — only for single selection */}
-        {selectedDotIds.size === 1 && selectedDot && mode === 'compose' && mainRef.current && (() => {
+        {selectedDotIds.size === 1 && selectedDot && mode === 'compose' && mainRef.current && canvasRef.current && (() => {
           const sc = canvasToViewport(selectedDot.x, selectedDot.y)
           const rx = selectedDot.rx ?? DEFAULT_RX
           const ry = selectedDot.ry ?? DEFAULT_RY
@@ -2503,10 +2793,9 @@ export default function App() {
         })()}
 
         {/* Dot tooltip — single selection */}
-        {selectedDotIds.size === 1 && selectedDot && mode === 'compose' && mainRef.current && (() => {
-          const { width, height } = mainRef.current.getBoundingClientRect()
-          const tx = width / 2 + view.pan.x + (selectedDot.x - cW / 2) * view.zoom
-          const ty = height / 2 + view.pan.y + (selectedDot.y - cH / 2) * view.zoom
+        {selectedDotIds.size === 1 && selectedDot && mode === 'compose' && mainRef.current && canvasRef.current && (() => {
+          const sc = canvasToViewport(selectedDot.x, selectedDot.y)
+          const tx = sc.x, ty = sc.y
           return (
             <div style={{
               position: 'absolute',
@@ -2574,7 +2863,7 @@ export default function App() {
         })()}
 
         {/* Multi-select tooltip */}
-        {selectedDotIds.size > 1 && mode === 'compose' && mainRef.current && (() => {
+        {selectedDotIds.size > 1 && mode === 'compose' && mainRef.current && canvasRef.current && (() => {
           const selDots = present.dots.filter(d => selectedDotIds.has(d.id))
           const cx = selDots.reduce((s, d) => s + d.x, 0) / selDots.length
           const cy = selDots.reduce((s, d) => s + d.y, 0) / selDots.length
