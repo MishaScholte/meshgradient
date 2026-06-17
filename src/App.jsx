@@ -19,7 +19,7 @@ const MAX_HISTORY = 50
 const LS_KEY = 'hazy-palettes'
 const DEFAULT_WARP_R = 150
 const MIN_WARP_R = 20
-const INIT_FILTERS = { grain: 0, blur: 0, contrast: 100, brightness: 100, saturation: 100, hue: 0 }
+const INIT_FILTERS = { grain: 0, grainSize: 1, grainColor: false, blur: 0, contrast: 100, brightness: 100, saturation: 100, hue: 0 }
 const DEFAULT_RX = 280
 const DEFAULT_RY = 280
 const MIN_RADIUS = 20
@@ -2341,13 +2341,37 @@ export default function App() {
 
           {/* ── Filters ── */}
           <Section title="Filters" tourId="filters-section">
-            <FilterSlider label="Sharpness" value={present.sharpness} min={1} max={8} step={0.5} unit="" onChange={v => commit({ ...present, sharpness: v })} />
-            <FilterSlider label="Grain" value={present.filters.grain} min={0} max={100} unit="%" onChange={v => updateFilter('grain', v)} />
-            <FilterSlider label="Blur" value={present.filters.blur} min={0} max={100} unit="%" onChange={v => updateFilter('blur', v)} />
-            <FilterSlider label="Contrast" value={present.filters.contrast} min={100} max={200} unit="%" onChange={v => updateFilter('contrast', v)} />
-            <FilterSlider label="Brightness" value={present.filters.brightness} min={100} max={200} unit="%" onChange={v => updateFilter('brightness', v)} />
-            <FilterSlider label="Saturation" value={present.filters.saturation ?? 100} min={0} max={200} unit="%" onChange={v => updateFilter('saturation', v)} />
-            <FilterSlider label="Hue rotate" value={present.filters.hue} min={0} max={360} unit="°" onChange={v => updateFilter('hue', v)} />
+            {[
+              { label: 'Image', content: <>
+                <FilterSlider label="Sharpness" value={present.sharpness} min={1} max={8} step={0.5} unit="" onChange={v => commit({ ...present, sharpness: v })} />
+                <FilterSlider label="Blur" value={present.filters.blur} min={0} max={100} unit="%" onChange={v => updateFilter('blur', v)} />
+              </> },
+              { label: 'Grain', content: <>
+                <FilterSlider label="Strength" value={present.filters.grain} min={0} max={100} unit="%" onChange={v => updateFilter('grain', v)} />
+                {present.filters.grain > 0 && (<>
+                  <FilterSlider label="Size" value={present.filters.grainSize ?? 1} min={1} max={2} step={0.05} onChange={v => updateFilter('grainSize', v)} />
+                  <div className="mb-3 flex items-center justify-between">
+                    <span className="text-[10px] text-white/40 uppercase tracking-wide">Color</span>
+                    <Toggle on={present.filters.grainColor ?? false} onChange={v => updateFilter('grainColor', v)} label="" />
+                  </div>
+                </>)}
+              </> },
+              { label: 'Color', content: <>
+                <FilterSlider label="Contrast" value={present.filters.contrast} min={100} max={200} unit="%" onChange={v => updateFilter('contrast', v)} />
+                <FilterSlider label="Brightness" value={present.filters.brightness} min={100} max={200} unit="%" onChange={v => updateFilter('brightness', v)} />
+                <FilterSlider label="Saturation" value={present.filters.saturation ?? 100} min={0} max={200} unit="%" onChange={v => updateFilter('saturation', v)} />
+                <FilterSlider label="Hue rotate" value={present.filters.hue} min={0} max={360} unit="°" onChange={v => updateFilter('hue', v)} />
+              </> },
+            ].map(({ label, content }) => (
+              <div key={label} style={{
+                background: 'rgba(255,255,255,0.03)',
+                border: '1px solid rgba(255,255,255,0.07)',
+                borderRadius: 8, padding: '10px 10px 0', marginBottom: 8,
+              }}>
+                <span style={{ display: 'block', fontSize: 9, color: 'rgba(255,255,255,0.22)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>{label}</span>
+                {content}
+              </div>
+            ))}
             <button onClick={resetFilters}
               className="w-full mt-1 py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
               Reset filters
@@ -2535,8 +2559,12 @@ export default function App() {
               }}>
                 <defs>
                   <filter id="hazy-grain" x="0" y="0" width="100%" height="100%">
-                    <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch" />
-                    <feColorMatrix type="saturate" values="0" />
+                    <feTurbulence type="fractalNoise"
+                      baseFrequency={(0.65 / (present.filters.grainSize ?? 1)).toFixed(5)}
+                      numOctaves="3" stitchTiles="stitch" />
+                    {!(present.filters.grainColor ?? false) && (
+                      <feColorMatrix type="saturate" values="0" />
+                    )}
                   </filter>
                 </defs>
                 <rect width={cW} height={cH} filter="url(#hazy-grain)" />
