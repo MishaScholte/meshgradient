@@ -1973,9 +1973,6 @@ export default function App() {
       backgroundSize: '16px 16px',
     }),
   }
-  const bgPickerRef = useRef(null)
-  const [bgHexDraft, setBgHexDraft] = useState(present.background.hex)
-  useEffect(() => setBgHexDraft(present.background.hex), [present.background.hex])
   useEffect(() => { setWDraft(String(cW)); setHDraft(String(cH)) }, [cW, cH])
 
   useEffect(() => {
@@ -1986,12 +1983,6 @@ export default function App() {
     document.addEventListener('mousedown', onPointerDown)
     return () => document.removeEventListener('mousedown', onPointerDown)
   }, [fileMenuOpen])
-
-  function commitBgHex(val) {
-    const c = /^#/.test(val) ? val : '#' + val
-    if (/^#[0-9a-fA-F]{6}$/.test(c)) updateBackground({ ...present.background, hex: c.toLowerCase() })
-    else setBgHexDraft(present.background.hex)
-  }
 
   // ── JSX ───────────────────────────────────────────────────────────────────────
 
@@ -2051,32 +2042,6 @@ export default function App() {
 
           {/* ── Colors ── */}
           <Section title="Colors" defaultOpen tourId="colors-section">
-
-            {/* Background */}
-            <div className="mb-3 pb-3 border-b border-white/[0.06]">
-              <div className="text-[10px] text-white/30 mb-2 uppercase tracking-wide">Background</div>
-              <div className="flex items-center gap-1.5 mb-2">
-                <div onClick={() => bgPickerRef.current?.click()} style={{
-                  width: 20, height: 20, borderRadius: 4, flexShrink: 0,
-                  background: present.background.hex,
-                  border: '1.5px solid rgba(255,255,255,0.12)', cursor: 'pointer',
-                }} />
-                <input ref={bgPickerRef} type="color" value={present.background.hex}
-                  onChange={e => updateBackground({ ...present.background, hex: e.target.value })}
-                  style={{ position: 'absolute', opacity: 0, width: 0, height: 0, pointerEvents: 'none' }} />
-                <input value={bgHexDraft}
-                  onChange={e => setBgHexDraft(e.target.value)}
-                  onBlur={e => commitBgHex(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && commitBgHex(bgHexDraft)}
-                  maxLength={7}
-                  className="font-mono text-[11px] text-white/60 bg-white/[0.05] border border-white/[0.08] rounded px-1.5 py-0.5 outline-none focus:border-white/20 w-[68px] shrink-0"
-                  spellCheck={false}
-                />
-              </div>
-              <Toggle on={present.background.transparent}
-                onChange={v => updateBackground({ ...present.background, transparent: v })}
-                label="Transparent" />
-            </div>
 
             {/* Palette */}
             <div className="mb-2">
