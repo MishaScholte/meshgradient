@@ -728,6 +728,7 @@ function AngleKnob({ angle, onAngleChange, onDragStart, onDragEnd }) {
 }
 
 function DotPropertiesPanel({ dots, onUpdate, onLiveUpdate, onDragStart, onDragEnd }) {
+  const rotKnobRef = useRef(null)
   if (!dots.length) return null
 
   const x = dotVal(dots, d => d.x)
@@ -767,11 +768,42 @@ function DotPropertiesPanel({ dots, onUpdate, onLiveUpdate, onDragStart, onDragE
       <div style={secStyle}>
         <div style={labelStyle}>Rotation</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-          <AngleKnob angle={thetaDeg} onDragStart={onDragStart} onDragEnd={onDragEnd}
-            onAngleChange={deg => onLiveUpdate(d => ({ ...d, theta: deg * Math.PI / 180 }))} />
+          <AngleKnob angle={thetaDeg}
+            onDragStart={() => {
+              onDragStart()
+              rotKnobRef.current = { prevRad: null, totalDelta: 0, initDots: dots.map(d => ({ id: d.id, theta: d.theta ?? 0, dx: d.dx ?? 0, dy: d.dy ?? 0 })) }
+            }}
+            onDragEnd={() => { rotKnobRef.current = null; onDragEnd() }}
+            onAngleChange={deg => {
+              const rk = rotKnobRef.current
+              if (!rk) return
+              const rad = deg * Math.PI / 180
+              if (rk.prevRad !== null) {
+                let incr = rad - rk.prevRad
+                if (incr > Math.PI) incr -= 2 * Math.PI
+                if (incr < -Math.PI) incr += 2 * Math.PI
+                rk.totalDelta += incr
+              }
+              rk.prevRad = rad
+              const delta = rk.totalDelta
+              const rc = Math.cos(delta), rs = Math.sin(delta)
+              onLiveUpdate(d => {
+                const orig = rk.initDots.find(o => o.id === d.id)
+                if (!orig) return d
+                return { ...d, theta: orig.theta + delta, dx: orig.dx * rc - orig.dy * rs, dy: orig.dx * rs + orig.dy * rc }
+              })
+            }} />
           <div style={{ flex: 1 }}>
             <PropInput label="" value={thetaDeg} digits={1} min={0} unit="°"
-              onCommit={deg => onUpdate(d => ({ ...d, theta: deg * Math.PI / 180 }))} />
+              onCommit={deg => onUpdate(d => {
+                const newTheta = deg * Math.PI / 180
+                const oldNorm = ((d.theta ?? 0) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI)
+                let delta = newTheta - oldNorm
+                if (delta > Math.PI) delta -= 2 * Math.PI
+                if (delta < -Math.PI) delta += 2 * Math.PI
+                const rc = Math.cos(delta), rs = Math.sin(delta)
+                return { ...d, theta: (d.theta ?? 0) + delta, dx: (d.dx ?? 0) * rc - (d.dy ?? 0) * rs, dy: (d.dx ?? 0) * rs + (d.dy ?? 0) * rc }
+              })} />
           </div>
         </div>
       </div>
@@ -1463,6 +1495,10 @@ export default function App() {
       else if (delta < -Math.PI) delta += 2 * Math.PI
       const raw = theta + delta
       updated.theta = e.shiftKey ? Math.round(raw / ROT_SNAP) * ROT_SNAP : raw
+      const ad = updated.theta - theta
+      const rc = Math.cos(ad), rs = Math.sin(ad)
+      updated.dx = (dot.dx ?? 0) * rc - (dot.dy ?? 0) * rs
+      updated.dy = (dot.dx ?? 0) * rs + (dot.dy ?? 0) * rc
       wd.prevAngle = cur
     }
     liveUpdate({
@@ -1591,6 +1627,10 @@ export default function App() {
       else if (delta < -Math.PI) delta += 2 * Math.PI
       const raw = theta + delta
       updated.theta = e.shiftKey ? Math.round(raw / ROT_SNAP) * ROT_SNAP : raw
+      const ad = updated.theta - theta
+      const rc = Math.cos(ad), rs = Math.sin(ad)
+      updated.dx = (dot.dx ?? 0) * rc - (dot.dy ?? 0) * rs
+      updated.dy = (dot.dx ?? 0) * rs + (dot.dy ?? 0) * rc
       bd.prevAngle = cur
     }
     liveUpdate({ ...presentRef.current, blurDots: presentRef.current.blurDots.map(d => d.id === id ? updated : d) })
@@ -1616,7 +1656,7 @@ export default function App() {
       dotMode,
       centroid: { x: cx, y: cy },
       initAngle: Math.atan2(cp.y - cy, cp.x - cx),
-      starts: dots.map(d => ({ id: d.id, x: d.x, y: d.y, theta: d.theta ?? 0 })),
+      starts: dots.map(d => ({ id: d.id, x: d.x, y: d.y, theta: d.theta ?? 0, dx: d.dx ?? 0, dy: d.dy ?? 0 })),
       snapshot: presentRef.current,
     }
   }
@@ -1635,7 +1675,7 @@ export default function App() {
       const s = gr.starts.find(s => s.id === d.id)
       if (!s) return d
       const rx = s.x - ocx, ry = s.y - ocy
-      return { ...d, x: ocx + rx * cos - ry * sin, y: ocy + rx * sin + ry * cos, theta: s.theta + delta }
+      return { ...d, x: ocx + rx * cos - ry * sin, y: ocy + rx * sin + ry * cos, theta: s.theta + delta, dx: s.dx * cos - s.dy * sin, dy: s.dx * sin + s.dy * cos }
     }
     const cur = presentRef.current
     if (gr.dotMode === 'warp') {
