@@ -1356,6 +1356,15 @@ export default function App() {
     const prevSel = selectedWarpDotIdsRef.current
     const selIds = prevSel.has(id) ? prevSel : new Set([id])
     if (!prevSel.has(id)) setSelectedWarpDotIds(selIds)
+    if (e.altKey) {
+      const snapshot = presentRef.current
+      const dups = snapshot.warp.warpDots.filter(d => selIds.has(d.id)).map(d => ({ ...d, id: uid() }))
+      const starts = Object.fromEntries(dups.map(d => [d.id, { x: d.x, y: d.y }]))
+      liveUpdate({ ...snapshot, warp: { ...snapshot.warp, warpDots: [...snapshot.warp.warpDots, ...dups] } })
+      setSelectedWarpDotIds(new Set(dups.map(d => d.id)))
+      warpDotDrag.current = { type: 'body', id, starts, clientX: e.clientX, clientY: e.clientY, snapshot }
+      return
+    }
     const starts = {}
     for (const sid of selIds) {
       const dot = presentRef.current.warp.warpDots.find(d => d.id === sid)
@@ -1485,6 +1494,15 @@ export default function App() {
     const prevSel = selectedBlurDotIdsRef.current
     const selIds = prevSel.has(id) ? prevSel : new Set([id])
     if (!prevSel.has(id)) setSelectedBlurDotIds(selIds)
+    if (e.altKey) {
+      const snapshot = presentRef.current
+      const dups = (snapshot.blurDots ?? []).filter(d => selIds.has(d.id)).map(d => ({ ...d, id: uid() }))
+      const starts = Object.fromEntries(dups.map(d => [d.id, { x: d.x, y: d.y }]))
+      liveUpdate({ ...snapshot, blurDots: [...(snapshot.blurDots ?? []), ...dups] })
+      setSelectedBlurDotIds(new Set(dups.map(d => d.id)))
+      blurDotDrag.current = { type: 'body', id, starts, clientX: e.clientX, clientY: e.clientY, snapshot }
+      return
+    }
     const starts = {}
     for (const sid of selIds) {
       const dot = presentRef.current.blurDots.find(d => d.id === sid)
