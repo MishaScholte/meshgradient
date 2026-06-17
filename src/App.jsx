@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import {
   ChevronDown, Undo2, Redo2, Trash2, Plus, Shuffle, Contrast, Pipette,
-  Import, FileBraces, MoreHorizontal, Copy, Check, ImageDown, HelpCircle,
+  Import, FileBraces, Copy, Check, ImageDown, HelpCircle,
 } from 'lucide-react'
 import { driver } from 'driver.js'
 import 'driver.js/dist/driver.css'
@@ -161,7 +161,7 @@ const INIT_DOTS = [
   { id: 'dd', colorId: 'cd', x: 642, y: 405, rx: DEFAULT_RX, ry: DEFAULT_RY, theta: 0 },
 ]
 
-const INIT_WARP = { warpDots: [], intensity: 100 }
+const INIT_WARP = { warpDots: [] }
 
 const INIT_DOC = {
   background: { hex: '#050510', transparent: false },
@@ -250,12 +250,11 @@ function renderMeshGradient(interCanvas, offCtx, { background, sharpness = 2, co
   offCtx.restore()
 }
 
-function applyWarp(visCtx, offscreen, { warpDots = [], intensity = 100 }) {
-  const scale = intensity / 100
+function applyWarp(visCtx, offscreen, { warpDots = [] }) {
   const W = offscreen.width, H = offscreen.height
 
   const active = warpDots.filter(d => d.dx !== 0 || d.dy !== 0)
-  if (!active.length || scale === 0) {
+  if (!active.length) {
     visCtx.clearRect(0, 0, W, H)
     visCtx.drawImage(offscreen, 0, 0)
     return
@@ -272,7 +271,7 @@ function applyWarp(visCtx, offscreen, { warpDots = [], intensity = 100 }) {
     const ry = Math.max(1, d.ry ?? DEFAULT_WARP_R)
     return {
       x: d.x, y: d.y,
-      dx: d.dx * scale, dy: d.dy * scale,
+      dx: d.dx, dy: d.dy,
       cosT: Math.cos(theta), sinT: Math.sin(theta),
       rx2: rx * rx, ry2: ry * ry,
     }
@@ -618,6 +617,195 @@ function FilterSlider({ label, value, min, max, step = 1, unit, onChange }) {
   )
 }
 
+// ─── Dot properties panel ─────────────────────────────────────────────────────
+
+function dotVal(dots, getter, tolerance = 0.5) {
+  if (!dots.length) return undefined
+  const vals = dots.map(getter)
+  return vals.every(v => Math.abs(v - vals[0]) < tolerance) ? vals[0] : null
+}
+
+function PropInput({ label, value, unit, min, digits = 0, onCommit }) {
+  const fmt = v => v == null ? '' : digits > 0 ? Number(v).toFixed(digits) : String(Math.round(v))
+  const [draft, setDraft] = useState(() => fmt(value))
+  const focused = useRef(false)
+
+  useEffect(() => {
+    if (!focused.current) setDraft(fmt(value))
+  }, [value])
+
+  function tryCommit(str) {
+    const trimmed = str.trim()
+    let num
+    // Formula operators: +N, *N, /N applied to current value
+    if (value != null && /^[+*/]/.test(trimmed)) {
+      const op = trimmed[0]
+      const operand = parseFloat(trimmed.slice(1))
+      if (!isNaN(operand)) {
+        if (op === '+') num = value + operand
+        else if (op === '*') num = value * operand
+        else if (op === '/' && operand !== 0) num = value / operand
+      }
+    }
+    if (num == null || isNaN(num)) num = parseFloat(trimmed)
+    if (isNaN(num)) { setDraft(fmt(value)); return }
+    const clamped = min != null ? Math.max(min, num) : num
+    onCommit(clamped)
+    setDraft(fmt(clamped))
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      {label && <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.28)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</span>}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+        <input
+          value={focused.current ? draft : fmt(value)}
+          placeholder={value === null ? 'Multiple' : ''}
+          title={min != null ? `Min: ${min}` : undefined}
+          style={{
+            width: '100%', minWidth: 0,
+            background: 'rgba(255,255,255,0.05)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: 4, padding: '3px 5px',
+            fontSize: 11, color: 'rgba(255,255,255,0.65)',
+            fontFamily: 'monospace', outline: 'none',
+            colorScheme: 'dark',
+          }}
+          onFocus={e => { focused.current = true; setDraft(fmt(value)); e.target.select() }}
+          onChange={e => setDraft(e.target.value)}
+          onBlur={e => { focused.current = false; tryCommit(e.target.value) }}
+          onKeyDown={e => {
+            if (e.key === 'Enter') { tryCommit(draft); e.target.blur() }
+            if (e.key === 'Escape') { focused.current = false; setDraft(fmt(value)); e.target.blur() }
+            if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && value != null) {
+              e.preventDefault()
+              const step = e.shiftKey ? 10 : 1
+              tryCommit(String(value + (e.key === 'ArrowUp' ? step : -step)))
+            }
+          }}
+        />
+        {unit && <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.28)', flexShrink: 0, marginLeft: 1 }}>{unit}</span>}
+      </div>
+    </div>
+  )
+}
+
+function AngleKnob({ angle, onAngleChange, onDragStart, onDragEnd }) {
+  const ref = useRef(null)
+  const dragging = useRef(false)
+
+  function angleFromEvent(e) {
+    const r = ref.current.getBoundingClientRect()
+    const deg = Math.atan2(e.clientY - (r.top + r.height / 2), e.clientX - (r.left + r.width / 2)) * 180 / Math.PI
+    return ((deg % 360) + 360) % 360
+  }
+
+  const lineX = angle != null ? 12 + 7 * Math.cos(angle * Math.PI / 180) : 19
+  const lineY = angle != null ? 12 + 7 * Math.sin(angle * Math.PI / 180) : 12
+
+  return (
+    <svg ref={ref} width={22} height={22} viewBox="0 0 24 24"
+      style={{ cursor: 'grab', flexShrink: 0, touchAction: 'none', userSelect: 'none' }}
+      onPointerDown={e => {
+        e.stopPropagation()
+        ref.current.setPointerCapture(e.pointerId)
+        dragging.current = true
+        onDragStart?.()
+        onAngleChange(angleFromEvent(e))
+      }}
+      onPointerMove={e => { if (!dragging.current) return; onAngleChange(angleFromEvent(e)) }}
+      onPointerUp={() => { dragging.current = false; onDragEnd?.() }}
+    >
+      <circle cx={12} cy={12} r={9} fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.12)" strokeWidth={1.5} />
+      {angle != null ? (
+        <line x1={12} y1={12} x2={lineX} y2={lineY}
+          stroke="rgba(255,255,255,0.65)" strokeWidth={1.5} strokeLinecap="round" />
+      ) : (
+        <circle cx={12} cy={12} r={4} fill="none" stroke="rgba(255,255,255,0.2)" strokeDasharray="2 2" />
+      )}
+    </svg>
+  )
+}
+
+function DotPropertiesPanel({ dots, onUpdate, onLiveUpdate, onDragStart, onDragEnd }) {
+  if (!dots.length) return null
+
+  const x = dotVal(dots, d => d.x)
+  const y = dotVal(dots, d => d.y)
+  const rx = dotVal(dots, d => d.rx ?? DEFAULT_WARP_R)
+  const ry = dotVal(dots, d => d.ry ?? DEFAULT_WARP_R)
+  const thetaRaw = dotVal(dots, d => ((d.theta ?? 0) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI), 0.01)
+  const thetaDeg = thetaRaw != null ? thetaRaw * 180 / Math.PI : null
+  const mag = dotVal(dots, d => Math.hypot(d.dx ?? 0, d.dy ?? 0), 0.5)
+  const dispAngle = dotVal(dots, d => {
+    if ((d.dx ?? 0) === 0 && (d.dy ?? 0) === 0) return 0
+    return ((Math.atan2(d.dy ?? 0, d.dx ?? 0) * 180 / Math.PI) + 360) % 360
+  }, 0.5)
+
+  const labelStyle = { fontSize: 9, color: 'rgba(255,255,255,0.28)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 5 }
+  const rowStyle = { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }
+  const secStyle = { marginBottom: 10 }
+
+  return (
+    <div style={{ marginBottom: 10, paddingBottom: 10, borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+      <div style={secStyle}>
+        <div style={labelStyle}>Position</div>
+        <div style={rowStyle}>
+          <PropInput label="X" value={x} digits={0} onCommit={v => onUpdate(d => ({ ...d, x: v }))} />
+          <PropInput label="Y" value={y} digits={0} onCommit={v => onUpdate(d => ({ ...d, y: v }))} />
+        </div>
+      </div>
+
+      <div style={secStyle}>
+        <div style={labelStyle}>Radius</div>
+        <div style={rowStyle}>
+          <PropInput label="Rx" value={rx} digits={0} min={MIN_WARP_R} onCommit={v => onUpdate(d => ({ ...d, rx: v }))} />
+          <PropInput label="Ry" value={ry} digits={0} min={MIN_WARP_R} onCommit={v => onUpdate(d => ({ ...d, ry: v }))} />
+        </div>
+      </div>
+
+      <div style={secStyle}>
+        <div style={labelStyle}>Rotation</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <AngleKnob angle={thetaDeg} onDragStart={onDragStart} onDragEnd={onDragEnd}
+            onAngleChange={deg => onLiveUpdate(d => ({ ...d, theta: deg * Math.PI / 180 }))} />
+          <div style={{ flex: 1 }}>
+            <PropInput label="" value={thetaDeg} digits={1} min={0} unit="°"
+              onCommit={deg => onUpdate(d => ({ ...d, theta: deg * Math.PI / 180 }))} />
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div style={labelStyle}>Displacement</div>
+        <div style={rowStyle}>
+          <PropInput label="Dist" value={mag} digits={1} min={0}
+            onCommit={v => onUpdate(d => {
+              const a = Math.atan2(d.dy ?? 0, d.dx ?? 0)
+              return { ...d, dx: v * Math.cos(a), dy: v * Math.sin(a) }
+            })} />
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4 }}>
+            <AngleKnob angle={dispAngle} onDragStart={onDragStart} onDragEnd={onDragEnd}
+              onAngleChange={deg => onLiveUpdate(d => {
+                const m = Math.hypot(d.dx ?? 0, d.dy ?? 0)
+                const r = deg * Math.PI / 180
+                return { ...d, dx: m * Math.cos(r), dy: m * Math.sin(r) }
+              })} />
+            <div style={{ flex: 1 }}>
+              <PropInput label="Angle" value={dispAngle} digits={1} min={0} unit="°"
+                onCommit={deg => onUpdate(d => {
+                  const m = Math.hypot(d.dx ?? 0, d.dy ?? 0)
+                  const r = deg * Math.PI / 180
+                  return { ...d, dx: m * Math.cos(r), dy: m * Math.sin(r) }
+                })} />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 let dotClipboard = null
 
 // ─── App ──────────────────────────────────────────────────────────────────────
@@ -705,8 +893,6 @@ export default function App() {
 
   const contrastRef = useRef(null)
   const importInputRef = useRef(null)
-  const fileMenuRef = useRef(null)
-  const [fileMenuOpen, setFileMenuOpen] = useState(false)
   const [copiedPNG, setCopiedPNG] = useState(false)
 
   const panDrag = useRef(false)
@@ -716,6 +902,7 @@ export default function App() {
   const blurDotDrag = useRef(null)
   const ellipseDrag = useRef(null)
   const groupRotDrag = useRef(null)
+  const propSnapshotRef = useRef(null)
   const pinchDist = useRef(null)
   const spaceHeld = useRef(false)
   const [spaceDown, setSpaceDown] = useState(false)
@@ -1813,9 +2000,6 @@ export default function App() {
 
   // ── Warp operations ───────────────────────────────────────────────────────────
 
-  function updateWarpIntensity(v) {
-    commit({ ...present, warp: { ...present.warp, intensity: v } })
-  }
   function clearWarpDots() {
     commit({ ...present, warp: { ...present.warp, warpDots: [] } })
     setSelectedWarpDotIds(new Set())
@@ -1975,43 +2159,10 @@ export default function App() {
   }
   useEffect(() => { setWDraft(String(cW)); setHDraft(String(cH)) }, [cW, cH])
 
-  useEffect(() => {
-    if (!fileMenuOpen) return
-    function onPointerDown(e) {
-      if (!fileMenuRef.current?.contains(e.target)) setFileMenuOpen(false)
-    }
-    document.addEventListener('mousedown', onPointerDown)
-    return () => document.removeEventListener('mousedown', onPointerDown)
-  }, [fileMenuOpen])
-
   // ── JSX ───────────────────────────────────────────────────────────────────────
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#111]">
-
-      <div className="flex flex-col shrink-0">
-
-      {/* ── Header ──────────────────────────────────────────────────────── */}
-      <div className="h-12 flex items-center justify-between px-5 border-b border-white/[0.07] shrink-0 bg-[#181818]">
-        <span className="text-white text-[17px] font-semibold tracking-tight">Hazy</span>
-        <button onClick={startTutorial}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium text-white/45 border border-white/[0.08] hover:text-white/80 hover:border-white/20 hover:bg-white/[0.06] transition-colors">
-          <HelpCircle size={12} /> Tutorial
-        </button>
-        <input
-          ref={importInputRef}
-          type="file"
-          accept="application/json,.json"
-          className="hidden"
-          onChange={e => {
-            const file = e.target.files?.[0]
-            if (file) importDocumentJSON(file)
-            e.target.value = ''
-          }}
-        />
-      </div>
-
-      <div className="flex flex-1 overflow-hidden">
 
       {/* ── File rail ───────────────────────────────────────────────────── */}
       <aside data-tour="file-rail" className="w-24 shrink-0 flex flex-col items-center bg-[#0d0d0d] border-r border-white/[0.07] px-4 py-2 gap-1.5 overflow-y-auto">
@@ -2036,12 +2187,32 @@ export default function App() {
       </aside>
 
       {/* ── Sidebar ─────────────────────────────────────────────────────── */}
-      <aside className="w-80 shrink-0 flex flex-col bg-[#181818] border-r border-white/[0.07]">
+      <aside className="w-80 shrink-0 flex flex-col bg-[#181818] border-l border-white/[0.07] order-3">
+
+        {/* ── Header ──────────────────────────────────────────────────────── */}
+        <div className="h-12 flex items-center justify-between px-5 border-b border-white/[0.07] shrink-0">
+          <span className="text-white text-[17px] font-semibold tracking-tight">Hazy</span>
+          <button onClick={startTutorial}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium text-white/45 border border-white/[0.08] hover:text-white/80 hover:border-white/20 hover:bg-white/[0.06] transition-colors">
+            <HelpCircle size={12} /> Tutorial
+          </button>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={e => {
+              const file = e.target.files?.[0]
+              if (file) importDocumentJSON(file)
+              e.target.value = ''
+            }}
+          />
+        </div>
 
         <nav className="flex-1 overflow-y-auto min-h-0">
 
           {/* ── Colors ── */}
-          <Section title="Colors" defaultOpen tourId="colors-section">
+          {mode === 'compose' && <Section title="Colors" defaultOpen tourId="colors-section">
 
             {/* Palette */}
             <div className="mb-2">
@@ -2112,27 +2283,61 @@ export default function App() {
                 </div>
               )}
             </div>
-          </Section>
+          </Section>}
 
           {/* ── Warp ── */}
-          <Section title="Warp" tourId="warp-section">
+          {mode === 'warp' && <Section title="Warp" defaultOpen tourId="warp-section">
             <p className="text-[10px] text-white/25 leading-relaxed mb-3">
               Switch to Warp mode and double-click to place dots. Drag the yellow handle to set direction and strength.
             </p>
-            <div className="mb-3">
-              <div className="flex justify-between items-center mb-1.5">
-                <span className="text-[10px] text-white/30 uppercase tracking-wide">Intensity</span>
-                <span className="text-[10px] text-white/40 tabular-nums">{present.warp.intensity}%</span>
-              </div>
-              <input type="range" min={0} max={200} value={present.warp.intensity}
-                onChange={e => updateWarpIntensity(+e.target.value)}
-                className="w-full accent-violet-400" style={{ cursor: 'pointer' }} />
-            </div>
-            <button onClick={clearWarpDots}
-              className="w-full py-1.5 rounded border border-white/[0.08] text-white/35 text-xs hover:text-white/60 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
-              Clear all{(present.warp.warpDots ?? []).length > 0 ? ` (${present.warp.warpDots.length})` : ''}
-            </button>
-          </Section>
+            {selectedWarpDotIds.size > 0 && (
+              <DotPropertiesPanel
+                dots={(present.warp.warpDots ?? []).filter(d => selectedWarpDotIds.has(d.id))}
+                onUpdate={updater => {
+                  commit({ ...present, warp: { ...present.warp, warpDots: present.warp.warpDots.map(d => selectedWarpDotIds.has(d.id) ? updater(d) : d) } })
+                }}
+                onLiveUpdate={updater => {
+                  const cur = presentRef.current
+                  liveUpdate({ ...cur, warp: { ...cur.warp, warpDots: cur.warp.warpDots.map(d => selectedWarpDotIdsRef.current.has(d.id) ? updater(d) : d) } })
+                }}
+                onDragStart={() => { propSnapshotRef.current = presentRef.current }}
+                onDragEnd={() => {
+                  if (propSnapshotRef.current) {
+                    setPast(p => [...p.slice(-(MAX_HISTORY - 1)), propSnapshotRef.current])
+                    setFuture([])
+                    propSnapshotRef.current = null
+                  }
+                }}
+              />
+            )}
+          </Section>}
+
+          {/* ── Blur ── */}
+          {mode === 'blur' && <Section title="Blur" defaultOpen>
+            <p className="text-[10px] text-white/25 leading-relaxed mb-3">
+              Switch to Blur mode and double-click to place dots. Drag the yellow handle to set blur direction and strength.
+            </p>
+            {selectedBlurDotIds.size > 0 && (
+              <DotPropertiesPanel
+                dots={(present.blurDots ?? []).filter(d => selectedBlurDotIds.has(d.id))}
+                onUpdate={updater => {
+                  commit({ ...present, blurDots: (present.blurDots ?? []).map(d => selectedBlurDotIds.has(d.id) ? updater(d) : d) })
+                }}
+                onLiveUpdate={updater => {
+                  const cur = presentRef.current
+                  liveUpdate({ ...cur, blurDots: (cur.blurDots ?? []).map(d => selectedBlurDotIdsRef.current.has(d.id) ? updater(d) : d) })
+                }}
+                onDragStart={() => { propSnapshotRef.current = presentRef.current }}
+                onDragEnd={() => {
+                  if (propSnapshotRef.current) {
+                    setPast(p => [...p.slice(-(MAX_HISTORY - 1)), propSnapshotRef.current])
+                    setFuture([])
+                    propSnapshotRef.current = null
+                  }
+                }}
+              />
+            )}
+          </Section>}
 
           {/* ── Filters ── */}
           <Section title="Filters" tourId="filters-section">
@@ -2171,20 +2376,38 @@ export default function App() {
             </div>
           </Section>
 
+          {/* ── Export ── */}
+          <Section title="Export">
+            <div className="flex flex-col gap-2">
+              <button onClick={copyPNG}
+                className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded border border-white/[0.08] text-xs transition-colors"
+                style={{ color: copiedPNG ? 'rgba(134,239,172,1)' : 'rgba(255,255,255,0.45)', background: copiedPNG ? 'rgba(134,239,172,0.06)' : undefined }}>
+                {copiedPNG ? <><Check size={12} /> Copied!</> : <><Copy size={12} /> Copy as PNG</>}
+              </button>
+              <button onClick={exportPNG}
+                className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded border border-white/[0.08] text-white/40 text-xs hover:text-white/70 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
+                <ImageDown size={12} /> Export as PNG
+              </button>
+              <button onClick={() => importInputRef.current?.click()}
+                className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded border border-white/[0.08] text-white/40 text-xs hover:text-white/70 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
+                <Import size={12} /> Import gradient (JSON)
+              </button>
+              <button onClick={exportDocumentJSON}
+                className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded border border-white/[0.08] text-white/40 text-xs hover:text-white/70 hover:border-white/20 hover:bg-white/[0.04] transition-colors">
+                <FileBraces size={12} /> Export gradient (JSON)
+              </button>
+            </div>
+          </Section>
+
         </nav>
 
-        {/* Undo / Redo */}
       </aside>
-
-      </div>
-
-      </div>
 
       {/* ── Canvas area ──────────────────────────────────────────────────── */}
       <main
         ref={mainRef}
         data-tour="canvas"
-        className="flex-1 relative overflow-hidden"
+        className="flex-1 relative overflow-hidden order-2"
         style={{ cursor: spaceDown ? 'grab' : mode !== 'compose' || activeColorId ? 'crosshair' : 'default' }}
         onPointerDown={onMainPointerDown}
         onPointerMove={onMainPointerMove}
@@ -2195,8 +2418,30 @@ export default function App() {
         onTouchMove={onTouchMove}
       >
         {/* Mode switcher */}
-        <div data-tour="mode-switcher" className="absolute top-3 left-1/2 -translate-x-1/2 z-20 select-none" data-no-pan="">
-          <div style={{
+        {/* Toolbar: contrast | mode switcher | undo/redo */}
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 select-none flex items-center" style={{ gap: 16 }} data-no-pan="">
+
+          {/* Contrast */}
+          <button
+            data-tour="contrast-toggle"
+            data-no-pan=""
+            onClick={() => setContrastCheck(c => !c)}
+            title="WCAG contrast heatmap"
+            className="flex items-center justify-center"
+            style={{
+              width: 28, height: 28, borderRadius: 6, flexShrink: 0,
+              color: contrastCheck ? 'rgba(196,181,253,1)' : 'rgba(255,255,255,0.35)',
+              background: contrastCheck ? 'rgba(139,92,246,0.28)' : 'rgba(0,0,0,0.55)',
+              backdropFilter: 'blur(10px)',
+              border: contrastCheck ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.09)',
+              cursor: 'pointer',
+            }}
+          >
+            <Contrast size={13} />
+          </button>
+
+          {/* Mode switcher */}
+          <div data-tour="mode-switcher" style={{
             display: 'flex', gap: 2, padding: 3,
             background: 'rgba(0,0,0,0.55)',
             border: '1px solid rgba(255,255,255,0.09)',
@@ -2229,13 +2474,11 @@ export default function App() {
               )
             })}
           </div>
-        </div>
 
-        {/* Export buttons */}
-        <div data-tour="export-buttons" className="absolute top-3 right-3 z-20 flex items-center gap-1.5 select-none" data-no-pan="">
+          {/* Undo / Redo */}
           <div className="flex items-center" style={{
             height: 28, background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(10px)',
-            border: '1px solid rgba(255,255,255,0.09)', borderRadius: 6,
+            border: '1px solid rgba(255,255,255,0.09)', borderRadius: 6, flexShrink: 0,
           }}>
             <button onClick={undo} disabled={!canUndo} data-no-pan=""
               title="Undo (⌘Z)"
@@ -2251,46 +2494,7 @@ export default function App() {
               <Redo2 size={12} strokeWidth={2.2} />
             </button>
           </div>
-          <button onClick={copyPNG} data-no-pan=""
-            className="flex items-center gap-1.5 px-2.5 rounded-md text-[11px] font-medium leading-none transition-colors"
-            style={{
-              height: 28,
-              color: copiedPNG ? 'rgba(134,239,172,1)' : 'rgba(255,255,255,0.7)',
-              background: 'rgba(0,0,0,0.55)',
-              backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.09)',
-              cursor: 'pointer',
-            }}>
-            {copiedPNG ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy as PNG</>}
-          </button>
-          <div ref={fileMenuRef} className="relative">
-            <button onClick={() => setFileMenuOpen(v => !v)} data-no-pan=""
-              title="More options"
-              className="flex items-center justify-center px-2 rounded-md transition-colors"
-              style={{
-                height: 28,
-                color: 'rgba(255,255,255,0.7)', background: 'rgba(0,0,0,0.55)',
-                backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.09)',
-                cursor: 'pointer',
-              }}>
-              <MoreHorizontal size={12} />
-            </button>
-            {fileMenuOpen && (
-              <div className="absolute right-0 top-full mt-1.5 w-44 rounded-md border border-white/[0.08] bg-[#1c1c1c] shadow-lg shadow-black/40 py-1 z-20">
-                <button onClick={() => { setFileMenuOpen(false); exportPNG() }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-white/60 hover:text-white/90 hover:bg-white/[0.06] transition-colors">
-                  <ImageDown size={12} /> Export as PNG
-                </button>
-                <button onClick={() => { setFileMenuOpen(false); importInputRef.current?.click() }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-white/60 hover:text-white/90 hover:bg-white/[0.06] transition-colors">
-                  <Import size={12} /> Import gradient (JSON)
-                </button>
-                <button onClick={() => { setFileMenuOpen(false); exportDocumentJSON() }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-white/60 hover:text-white/90 hover:bg-white/[0.06] transition-colors">
-                  <FileBraces size={12} /> Export gradient (JSON)
-                </button>
-              </div>
-            )}
-          </div>
+
         </div>
 
         {/* Canvas + overlays */}
@@ -2912,24 +3116,6 @@ export default function App() {
           {Math.round(view.zoom * 100)}%
         </button>
 
-        {/* Contrast toggle — top-left */}
-        <button
-          data-tour="contrast-toggle"
-          data-no-pan=""
-          onClick={() => setContrastCheck(c => !c)}
-          title="WCAG contrast heatmap"
-          className="absolute top-3 left-3 z-20 flex items-center justify-center select-none"
-          style={{
-            width: 28, height: 28, borderRadius: 6,
-            color: contrastCheck ? 'rgba(196,181,253,1)' : 'rgba(255,255,255,0.35)',
-            background: contrastCheck ? 'rgba(139,92,246,0.28)' : 'rgba(0,0,0,0.55)',
-            backdropFilter: 'blur(10px)',
-            border: contrastCheck ? '1px solid rgba(139,92,246,0.4)' : '1px solid rgba(255,255,255,0.09)',
-            cursor: 'pointer',
-          }}
-        >
-          <Contrast size={13} />
-        </button>
       </main>
 
     </div>
